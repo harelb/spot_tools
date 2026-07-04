@@ -113,6 +113,33 @@ def test_detection_under_translated_label_matches_canonical_query():
     assert xy is not None
 
 
+def test_mixed_case_synonym_value_still_matches():
+    """Regression test for the case-sensitivity gap: set_up_detector
+    lowercases registered prompt classes, so a mixed-case synonym value like
+    "Cement Bag" registers as "cement bag" -- the detection match must
+    compare in the same lowercase space or the class silently never
+    matches."""
+    detector, fake_yolo = make_detector(class_synonyms={"bag": "Cement Bag"})
+
+    # The registered vocabulary must be in the normalized (lowercase) space.
+    assert "cement bag" in fake_yolo.model.names
+    assert "Cement Bag" not in fake_yolo.model.names
+
+    # set_up_detector("bag") must recognize the class as already registered.
+    fake_yolo.model.set_classes = MagicMock(wraps=fake_yolo.model.set_classes)
+    detector.set_up_detector("bag")
+    fake_yolo.model.set_classes.assert_not_called()
+
+    # A detection reported under the registered (lowercase) label must match
+    # the canonical query.
+    box = FakeBox(cls_id=0, conf=0.9, xyxy=[10, 10, 20, 20])
+    fake_yolo.set_results([FakeResult(boxes=[box], names={0: "cement bag"})])
+
+    xy = detector._get_centroid(make_img(), "bag", rotate=0, debug=False)
+
+    assert xy is not None
+
+
 def test_missing_synonym_entry_does_not_match_translated_label():
     """Sanity check for the failure mode task 6b flagged: if the synonym map
     is absent, a model reporting the translated label must NOT silently

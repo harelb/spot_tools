@@ -46,7 +46,13 @@ class YOLODetector(Detector):
         # in the stack) to the prompt phrase given to the detector's open-vocab
         # text encoder (e.g. "cement bag"). Classes without an entry are used
         # verbatim, so an empty/None map reproduces today's behavior exactly.
-        self.class_synonyms = class_synonyms or {}
+        # Prompt phrases are lowercase-normalized once here so that class
+        # registration (set_up_detector lowercases appended classes) and the
+        # detection match in _get_centroid operate in the same case space --
+        # a mixed-case synonym value must not silently never match.
+        self.class_synonyms = {
+            key: value.lower() for key, value in (class_synonyms or {}).items()
+        }
 
         self.yolo_model = YOLOE(yolo_world_path)
         custom_classes = ["", "bag", "cone", "pipe"]
@@ -121,7 +127,10 @@ class YOLODetector(Detector):
 
         best_box = None
         best_confidence = -1.0
-        prompt_class = self._to_prompt(semantic_class)
+        # Compare in lowercase space, matching how classes are registered
+        # (synonym values are lowered in __init__; set_up_detector lowercases
+        # appended classes).
+        prompt_class = self._to_prompt(semantic_class).lower()
 
         for r in results:
             boxes = r.boxes
@@ -142,7 +151,7 @@ class YOLODetector(Detector):
                 ):  # If the box is more than 95% the width of the image, skip it
                     continue
 
-                if class_name == prompt_class and confidence > best_confidence:
+                if class_name.lower() == prompt_class and confidence > best_confidence:
                     best_confidence = confidence
                     best_box = box
 

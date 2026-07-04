@@ -786,6 +786,15 @@ class SpotExecutorRos(Node):
             if detector_class_synonyms_str
             else None
         )
+        if detector_class_synonyms is not None and not isinstance(
+            detector_class_synonyms, dict
+        ):
+            raise ValueError(
+                "Parameter 'detector_class_synonyms' must be a YAML/JSON dict "
+                "mapping canonical class names to prompt phrases, got "
+                f"{type(detector_class_synonyms).__name__}: "
+                f"{detector_class_synonyms!r}"
+            )
 
         detector = YOLODetector(
             self.spot_interface,
