@@ -516,6 +516,16 @@ class RosFeedbackCollector:
         self.lease_takeover_publisher.publish(msg)
 
 
+def resolve_spot_interface(spot_interface: str, use_fake_spot_interface: bool) -> str:
+    """Back-compat resolution: explicit spot_interface wins; the legacy
+    use_fake_spot_interface flag maps to 'fake'."""
+    if spot_interface not in ("", "real", "fake", "sim"):
+        raise ValueError(f"Invalid spot_interface: {spot_interface}")
+    if spot_interface:
+        return spot_interface
+    return "fake" if use_fake_spot_interface else "real"
+
+
 class SpotExecutorRos(Node):
     def __init__(self):
         super().__init__("spot_executor_ros")
@@ -529,11 +539,8 @@ class SpotExecutorRos(Node):
         self.declare_parameter("bosdyn_client_username", "")
         self.declare_parameter("bosdyn_client_password", "")
         spot_ip = self.get_parameter("spot_ip").value
-        assert spot_ip != ""
         bdai_username = self.get_parameter("bosdyn_client_username").value
-        assert bdai_username != ""
         bdai_password = self.get_parameter("bosdyn_client_password").value
-        assert bdai_password != ""
 
         # Follow Skill
         self.declare_parameter("follower_lookahead", 0.0)
@@ -613,6 +620,11 @@ class SpotExecutorRos(Node):
         # Robot Initialization
         self.declare_parameter("use_fake_spot_interface", False)
         use_fake_spot_interface = self.get_parameter("use_fake_spot_interface").value
+        self.declare_parameter("spot_interface", "")
+        self.declare_parameter("sim_rgb_topic", "")
+        interface = resolve_spot_interface(
+            self.get_parameter("spot_interface").value, use_fake_spot_interface
+        )
 
         # mid-level planner parameters
         self.declare_parameter("mid_level_planner_type", "identity")
@@ -670,7 +682,7 @@ class SpotExecutorRos(Node):
                     f"Invalid mid-level planner type {mid_level_planner_type}"
                 )
 
-        if use_fake_spot_interface:
+        if interface == "fake":
             self.declare_parameter("fake_spot_external_pose", False)
             external_pose = self.get_parameter("fake_spot_external_pose").value
 
@@ -709,7 +721,30 @@ class SpotExecutorRos(Node):
                 external_pose=external_pose,
             )
 
-        else:
+        elif interface == "sim":
+            from dcist_sim_ros.sim_spot import SimSpot
+            from dcist_sim_ros.sim_spot_ros import SimSpotRos
+
+            # SimSpotRos provides get_pose_fn from TF; construct it first with
+            # a placeholder sim_spot and wire the back-reference afterward.
+            self.spot_ros_interface = SimSpotRos(
+                self,
+                None,
+                odom_frame,
+                body_frame,
+                rgb_topic=self.get_parameter("sim_rgb_topic").value,
+            )
+            self.spot_interface = SimSpot(
+                node=self,
+                robot_name=body_frame.split("/")[0],
+                get_pose_fn=self.spot_ros_interface.get_pose_fn,
+            )
+            self.spot_ros_interface.attach(self.spot_interface)
+
+        elif interface == "real":
+            assert spot_ip != ""
+            assert bdai_username != ""
+            assert bdai_password != ""
             self.get_logger().info("About to initialize Spot")
             self.get_logger().info(f"{bdai_username=}, {bdai_password=}, {spot_ip=}")
             self.spot_interface = Spot(
@@ -717,6 +752,9 @@ class SpotExecutorRos(Node):
                 password=bdai_password,
                 ip=spot_ip,
             )
+
+        else:
+            raise ValueError(f"Unknown spot_interface: {interface}")
 
         self.get_logger().info("Initialized!")
         self.status_str = "Idle"
