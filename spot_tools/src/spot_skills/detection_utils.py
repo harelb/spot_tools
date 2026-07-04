@@ -24,19 +24,44 @@ class Detector:
 
 
 class YOLODetector(Detector):
-    def __init__(self, spot, yolo_world_path):
+    def __init__(
+        self,
+        spot,
+        yolo_world_path,
+        conf: float = 0.25,
+        class_synonyms: Optional[dict] = None,
+    ):
         super().__init__(spot)
 
         print("Initializing YOLOWorld model. ")
         if not yolo_world_path:
             raise ValueError("YOLOWorld model path must be provided.")
 
+        # `conf` is passed explicitly to every predict call below. 0.25 matches
+        # the ultralytics library default, so leaving this unset preserves
+        # today's production behavior exactly.
+        self.conf = conf
+
+        # Maps a canonical semantic class name (e.g. "bag", used everywhere else
+        # in the stack) to the prompt phrase given to the detector's open-vocab
+        # text encoder (e.g. "cement bag"). Classes without an entry are used
+        # verbatim, so an empty/None map reproduces today's behavior exactly.
+        self.class_synonyms = class_synonyms or {}
+
         self.yolo_model = YOLOE(yolo_world_path)
         custom_classes = ["", "bag", "cone", "pipe"]
-        self.yolo_model.set_classes(custom_classes)
+        prompt_classes = [self._to_prompt(cls) for cls in custom_classes]
+        self.yolo_model.set_classes(prompt_classes)
         print("Set classes for YOLOWorld model.")
 
+    def _to_prompt(self, semantic_class):
+        """Translate a canonical semantic class name to the prompt phrase
+        registered with / reported by the detector model."""
+        return self.class_synonyms.get(semantic_class, semantic_class)
+
     def set_up_detector(self, semantic_class):
+        prompt_class = self._to_prompt(semantic_class)
+
         # Get list of current classes recognized by YOLO World model
         recognized_classes = self.yolo_model.model.names
 
@@ -46,8 +71,8 @@ class YOLODetector(Detector):
             recognized_classes = list(recognized_classes.values())
 
         # Check if the class exists in the list (lowercase for consistency)
-        if semantic_class.lower() not in [cls.lower() for cls in recognized_classes]:
-            updated_classes = recognized_classes + [semantic_class.lower()]
+        if prompt_class.lower() not in [cls.lower() for cls in recognized_classes]:
+            updated_classes = recognized_classes + [prompt_class.lower()]
             self.yolo_model.model.set_classes(updated_classes)
             print(f"Updated recognized classes: {updated_classes}")
 
@@ -92,10 +117,11 @@ class YOLODetector(Detector):
         elif rotate == 2:
             model_input = cv2.rotate(img, cv2.ROTATE_180)
 
-        results = self.yolo_model(model_input)
+        results = self.yolo_model(model_input, conf=self.conf)
 
         best_box = None
         best_confidence = -1.0
+        prompt_class = self._to_prompt(semantic_class)
 
         for r in results:
             boxes = r.boxes
@@ -116,7 +142,7 @@ class YOLODetector(Detector):
                 ):  # If the box is more than 95% the width of the image, skip it
                     continue
 
-                if class_name == semantic_class and confidence > best_confidence:
+                if class_name == prompt_class and confidence > best_confidence:
                     best_confidence = confidence
                     best_box = box
 

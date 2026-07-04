@@ -775,9 +775,23 @@ class SpotExecutorRos(Node):
 
         self.tf_lookup_fn = tf_lookup_fn  # TODO: use this to test transformation
 
+        self.declare_parameter("detector_confidence", 0.25)
+        self.declare_parameter("detector_class_synonyms", "")
+        detector_confidence = self.get_parameter("detector_confidence").value
+        detector_class_synonyms_str = self.get_parameter(
+            "detector_class_synonyms"
+        ).value
+        detector_class_synonyms = (
+            yaml.safe_load(detector_class_synonyms_str)
+            if detector_class_synonyms_str
+            else None
+        )
+
         detector = YOLODetector(
             self.spot_interface,
             yolo_world_path=detector_model_path,
+            conf=detector_confidence,
+            class_synonyms=detector_class_synonyms,
         )
 
         self.spot_executor = se.SpotExecutor(
