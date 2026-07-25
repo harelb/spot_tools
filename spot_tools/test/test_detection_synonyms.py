@@ -3,11 +3,13 @@ translation (Task 6c). No real YOLOE weights are loaded -- `ultralytics.YOLOE`
 is replaced with a lightweight fake that records how it was called.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 
+from spot_executor.spot_executor import SpotExecutor
 from spot_skills.detection_utils import YOLODetector
 
 
@@ -205,6 +207,23 @@ def test_custom_conf_is_passed_through_to_predict_call():
     detector._get_centroid(make_img(), "bag", rotate=0, debug=False)
 
     assert fake_yolo.last_conf == 0.02
+
+
+def test_spot_executor_uses_symbolic_grasp_hook_without_camera():
+    hook = MagicMock(return_value=True)
+    executor = SpotExecutor.__new__(SpotExecutor)
+    executor.spot_interface = SimpleNamespace(execute_symbolic_grasp=hook)
+    executor.detector = MagicMock()
+    executor.debug = False
+    command = SimpleNamespace(object_class="cone", object_id="o2")
+    feedback = MagicMock()
+
+    with patch("spot_executor.spot_executor.object_grasp") as visual_grasp:
+        assert executor.execute_pick(command, feedback)
+
+    hook.assert_called_once_with()
+    visual_grasp.assert_not_called()
+    feedback.set_robot_holding_state.assert_called_once_with(True, "O2")
 
 
 if __name__ == "__main__":

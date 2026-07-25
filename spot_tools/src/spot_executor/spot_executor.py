@@ -353,19 +353,24 @@ class SpotExecutor:
     def execute_pick(self, command, feedback):
         feedback.print("INFO", "Executing `pick` command")
 
-        success = object_grasp(
-            self.spot_interface,
-            self.detector,
-            image_source="frontleft_fisheye_image",
-            user_input=False,
-            semantic_class=command.object_class,
-            feedback=feedback,
-            should_stop=self.interrupted,
-            walk_to_standoff=self.walk_to_standoff,
-            walk_to_max_distance=self.walk_to_max_distance,
-        )
+        symbolic_grasp = getattr(self.spot_interface, "execute_symbolic_grasp", None)
+        if callable(symbolic_grasp):
+            # Camera-free simulator grasp (SimSpot).
+            success = symbolic_grasp()
+        else:
+            success = object_grasp(
+                self.spot_interface,
+                self.detector,
+                image_source="frontleft_fisheye_image",
+                user_input=False,
+                semantic_class=command.object_class,
+                feedback=feedback,
+                should_stop=self.interrupted,
+                walk_to_standoff=self.walk_to_standoff,
+                walk_to_max_distance=self.walk_to_max_distance,
+            )
 
-        if self.debug:
+        if self.debug and not callable(symbolic_grasp):
             success, debug_images = success
             sem_img = ski.util.img_as_ubyte(debug_images[0])
             feedback.print(
