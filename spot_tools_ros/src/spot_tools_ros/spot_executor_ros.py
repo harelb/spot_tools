@@ -550,6 +550,10 @@ class SpotExecutorRos(Node):
         goal_tolerance = self.get_parameter("goal_tolerance").value
         assert goal_tolerance > 0
         self.get_logger().info(f"{goal_tolerance=}")
+        self.declare_parameter("follow_timeout_per_meter", 6.0)
+        follow_timeout_per_meter = self.get_parameter(
+            "follow_timeout_per_meter").value
+        assert follow_timeout_per_meter > 0
 
         # Pick/Inspect Skill
         self.declare_parameter("semantic_model_path", "")
@@ -787,6 +791,7 @@ class SpotExecutorRos(Node):
             walk_to_max_distance=pick_walk_to_max_distance,
             plan_progress=self.plan_progress,
             plan_wait_timeout_s=float(self.get_parameter("plan_wait_timeout_s").value),
+            follow_timeout_per_meter=follow_timeout_per_meter,
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
