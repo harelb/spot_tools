@@ -30,6 +30,7 @@ from robot_executor_msgs.msg import (
     ActionMsg,
     ActionResultMsg,
     ActionSequenceMsg,
+    RuntimeGuardsMsg,
 )
 from ros_system_monitor_msgs.msg import NodeInfoMsg
 from sensor_msgs.msg import CompressedImage, Image
@@ -817,6 +818,13 @@ class SpotExecutorRos(Node):
         )
 
         self.heartbeat_pub = self.create_publisher(NodeInfoMsg, "~/node_status", 1)
+        # Volatile platform-state snapshot for the planner's dispatch gate.
+        # Published on every 10th heartbeat tick (~1 Hz at the 0.1 s
+        # heartbeat): guards are dispatch-time state, not telemetry.
+        self.runtime_guards_pub = self.create_publisher(
+            RuntimeGuardsMsg, "~/runtime_guards", 1
+        )
+        self._guard_tick = 0
         heartbeat_timer_group = MutuallyExclusiveCallbackGroup()
         timer_period_s = 0.1
         self.timer = self.create_timer(
@@ -940,6 +948,44 @@ class SpotExecutorRos(Node):
         msg.status = NodeInfoMsg.NOMINAL
         msg.notes = self.status_str
         self.heartbeat_pub.publish(msg)
+
+        self._guard_tick += 1
+        if self._guard_tick % 10 == 0:
+            self.publish_runtime_guards()
+
+    def publish_runtime_guards(self):
+        """Best-effort guard snapshot; must never break the heartbeat."""
+        from spot_executor.guards import extract_runtime_guards
+
+        try:
+            state = self.spot_interface.get_state()
+        except Exception as e:  # noqa: BLE001 -- a state hiccup is not fatal
+            self.get_logger().warning(f"runtime guards: get_state failed: {e}")
+            return
+        lease_owned = None
+        lease_manager = getattr(self.spot_executor, "lease_manager", None)
+        if lease_manager is not None:
+            owner = getattr(lease_manager, "owner_name", None)
+            if owner is not None:
+                lease_owned = str(owner).startswith("understanding")
+        guards = extract_runtime_guards(state, lease_owned=lease_owned)
+        msg = RuntimeGuardsMsg()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.robot_name = self.get_namespace().strip("/")
+        msg.battery_percent = float(guards["battery_percent"])
+        msg.battery_known = bool(guards["battery_known"])
+        msg.estop_pressed = bool(guards["estop_pressed"])
+        msg.estop_known = bool(guards["estop_known"])
+        msg.powered_on = bool(guards["powered_on"])
+        msg.power_known = bool(guards["power_known"])
+        msg.lease_owned = bool(guards["lease_owned"])
+        msg.lease_known = bool(guards["lease_known"])
+        msg.faults = [str(f) for f in guards["faults"]]
+        msg.notes = self.status_str
+        teleop = getattr(self, "teleop", None)
+        if teleop is not None:
+            msg.notes = f"{self.status_str}; {teleop.notes(self._teleop_standing)}"
+        self.runtime_guards_pub.publish(msg)
 
     def handle_take_lease(self, request, response):
         lease_manager = getattr(self.spot_executor, "lease_manager", None)
