@@ -142,6 +142,7 @@ class SpotExecutor:
         use_fake_path_planner=False,
         walk_to_standoff=1.5,
         walk_to_max_distance=5.0,
+        plan_progress=None,
     ):
         self.debug = False
         self.spot_interface = spot_interface
@@ -159,6 +160,10 @@ class SpotExecutor:
         self.processing_action_sequence = False
         self.mid_level_planner = planner
         self.use_fake_path_planner = use_fake_path_planner
+        # Precedence gate. Left None every action runs as soon as the previous
+        # one finishes, which is the behaviour every planner had before and is
+        # still what the fast-downward path gets -- it emits no ordering.
+        self.plan_progress = plan_progress
         self._pause_lock = threading.Lock()
 
         self.lease_manager = None
@@ -245,6 +250,7 @@ class SpotExecutor:
 
             ix = 0
             inner_loop_attempts = 0
+            waiting_on = None
             while ix < len(sequence.actions):
                 # Honor pause requests between actions
                 while True:
@@ -288,6 +294,23 @@ class SpotExecutor:
                 feedback.print("INFO", "Spot executor executing command: ")
                 feedback.print("INFO", command)
 
+                # Wait for the tasks this one must follow, and for coalition
+                # partners to reach their own start. Polling rather than
+                # blocking so a pause, a lost lease or a preemption is still
+                # noticed while we wait -- the same reason the pause gate above
+                # polls.
+                if self.plan_progress is not None:
+                    blocked = self.plan_progress.blocked_on(
+                        sequence.plan_id, command, sequence.robot_name
+                    )
+                    if blocked:
+                        if waiting_on != blocked:
+                            feedback.print("INFO", f"Waiting on: {'; '.join(blocked)}")
+                            waiting_on = blocked
+                        time.sleep(0.1)
+                        continue
+                    waiting_on = None
+
                 success = False
                 feedback.plan_valid = True
                 try:
@@ -318,6 +341,20 @@ class SpotExecutor:
                         report = getattr(feedback, "report_action_done", None)
                         if report is not None:
                             report(sequence, command, success)
+                        # A task spans several actions (a relocation is a pick,
+                        # a carry and a place); it is finished once the next
+                        # action belongs to a different one.
+                        if self.plan_progress is not None:
+                            task_id = getattr(command, "task_id", "")
+                            nxt = sequence.actions[ix + 1] if ix + 1 < len(
+                                sequence.actions
+                            ) else None
+                            if task_id and (
+                                nxt is None or getattr(nxt, "task_id", "") != task_id
+                            ):
+                                self.plan_progress.announce_done(
+                                    sequence.plan_id, sequence.robot_name, task_id
+                                )
                         ix += 1
                         inner_loop_attempts = 0
                     else:

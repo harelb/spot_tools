@@ -29,3 +29,23 @@ string object_id
 # Definition for PLACE
 string place_frame
 # Should drop the object for now.
+
+# --- Ordering (not timing) ---------------------------------------------
+# A temporal planner's timepoints assume the durations it was given, so a slow
+# pick invalidates every later one. Precedence does not decay that way, so the
+# executor gates on these and never on a clock.
+#
+# All three are empty for a planner that produces no schedule, which leaves the
+# gate inert -- the fast-downward path is unaffected.
+
+# Scheduled task this action belongs to. Several actions share one task id: a
+# relocation is a pick, a carry and a place.
+string task_id
+
+# Tasks that must be reported DONE, by any robot, before this action may start.
+# Set on the first action of a task only.
+string[] after_task_ids
+
+# Robots that must be reported READY before this action may start, for a task
+# allocated to a coalition. Includes this robot. Empty for a solo task.
+string[] coalition_robots
