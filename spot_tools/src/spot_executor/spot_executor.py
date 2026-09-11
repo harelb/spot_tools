@@ -225,7 +225,7 @@ class SpotExecutor:
 
                 command = sequence.actions[ix]
 
-                if not self.keep_going:
+                if not self.keep_going or feedback.break_out_of_waiting_loop:
                     feedback.print("INFO", "Action sequence was pre-empted.")
                     _report_action_result(
                         feedback, command, ix, "PREEMPTED",
@@ -286,20 +286,25 @@ class SpotExecutor:
                     time.sleep(2)
 
         except Exception as ex:
+            if "command" in locals():
+                _report_action_result(feedback, command, ix,
+                    "PREEMPTED" if feedback.break_out_of_waiting_loop else "FAILED", str(ex))
             self.processing_action_sequence = False
             raise ex
 
         self.processing_action_sequence = False
 
     def execute_gaze(self, command, feedback, pick_next=False):
-        # TODO: need to transform command to robot odom frame
+        from scipy.spatial.transform import Rotation
+        translation, rotation = self.transform_lookup("<spot_vision_frame>", command.frame)
+        gaze_point = Rotation.from_quat([rotation.x, rotation.y, rotation.z, rotation.w]).apply(command.gaze_point) + np.asarray(translation)
         feedback.print("INFO", "Executing `gaze` command")
         current_pose = self.spot_interface.get_pose()
-        turn_to_point(self.spot_interface, current_pose, command.gaze_point)
+        turn_to_point(self.spot_interface, current_pose, gaze_point)
         # stow_after = command.stow_after
         stow_after = not pick_next
         success = gaze_at_vision_pose(
-            self.spot_interface, command.gaze_point, stow_after=stow_after
+            self.spot_interface, gaze_point, stow_after=stow_after
         )
         feedback.gaze_feedback(current_pose, command.gaze_point)
         feedback.print("INFO", "Finished `gaze` command")
@@ -344,7 +349,10 @@ class SpotExecutor:
 
     def execute_place(self, command, feedback):
         feedback.print("INFO", "Executing `place` command")
-        success = object_place(self.spot_interface, semantic_class=command.object_class)
+        placement = getattr(feedback, "placement_feedback", None)
+        position = placement(command.object_class) if placement else None
+        success = object_place(self.spot_interface, semantic_class=command.object_class,
+                               position=position, cancelled=lambda: feedback.break_out_of_waiting_loop)
 
         if success:
             # Update object holding state

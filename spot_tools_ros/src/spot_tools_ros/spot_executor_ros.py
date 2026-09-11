@@ -9,12 +9,7 @@ import spot_executor as se
 import tf2_ros
 import yaml
 from cv_bridge import CvBridge
-from heracles_ros_interfaces.srv import UpdateHoldingState
 from nav_msgs.msg import Path
-from nlu_interface_rviz.msg import (
-    ManipulationApprovalRequest,
-    ManipulationApprovalResponse,
-)
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
@@ -106,9 +101,11 @@ class RosFeedbackCollector:
     def bounding_box_detection_feedback(
         self, detection_imgs, detection_index, centroid_x, centroid_y, semantic_class
     ):
+        if self.detection_img_pub is None or self.manipulation_request_type is None:
+            raise RuntimeError("manipulation interfaces are disabled")
         bridge = CvBridge()
 
-        request_msg = ManipulationApprovalRequest()
+        request_msg = self.manipulation_request_type()
         request_msg.images = [
             bridge.cv2_to_imgmsg(img, encoding="passthrough") for img in detection_imgs
         ]
@@ -211,8 +208,11 @@ class RosFeedbackCollector:
         msg.detail = str(detail)
         self.action_result_pub.publish(msg)
 
-    def register_publishers(self, node):
+    def register_publishers(self, node, enable_manipulation_interfaces=False):
         self.logger = node.get_logger()
+        self.detection_img_pub = None
+        self.holding_client = None
+        self.manipulation_request_type = None
 
         # ROS 2 transient local QoS for "latching" behavior
         latching_qos = QoSProfile(
@@ -247,12 +247,6 @@ class RosFeedbackCollector:
             MarkerArray, "~/mlp_target_publisher", qos_profile=latching_qos
         )
 
-        self.detection_img_pub = node.create_publisher(
-            ManipulationApprovalRequest,
-            "~/manipulation_request",
-            qos_profile=latching_qos,
-        )
-
         self.lease_takeover_publisher = node.create_publisher(String, "~/takeover", 10)
 
         # PR B5: per-action results back to the planner. Plain queue QoS —
@@ -262,16 +256,31 @@ class RosFeedbackCollector:
         )
         self._clock = node.get_clock()
 
-        node.create_subscription(
-            ManipulationApprovalResponse,
-            "~/pick_confirmation",
-            self.pick_confirmation_callback,
-            10,
-        )
+        if enable_manipulation_interfaces:
+            # These interfaces belong to the deprecated NLU/manipulation
+            # stack. Keep them lazy so this navigation-only deployment does
+            # not require that stack merely to import or start the executor.
+            from heracles_ros_interfaces.srv import UpdateHoldingState
+            from nlu_interface_rviz.msg import (
+                ManipulationApprovalRequest,
+                ManipulationApprovalResponse,
+            )
 
-        self.holding_client = node.create_client(
-            UpdateHoldingState, "update_holding_state"
-        )
+            self.manipulation_request_type = ManipulationApprovalRequest
+            self.detection_img_pub = node.create_publisher(
+                ManipulationApprovalRequest,
+                "~/manipulation_request",
+                qos_profile=latching_qos,
+            )
+            node.create_subscription(
+                ManipulationApprovalResponse,
+                "~/pick_confirmation",
+                self.pick_confirmation_callback,
+                10,
+            )
+            self.holding_client = node.create_client(
+                UpdateHoldingState, "update_holding_state"
+            )
 
         # TODO(aaron): Once we switch logging to python logger,
         # should move into init
@@ -284,6 +293,11 @@ class RosFeedbackCollector:
             fo.write("time,event\n")
 
     def set_robot_holding_state(self, is_holding: bool, object_id: str, timeout=5):
+        if self.holding_client is None:
+            self.logger.warning("Holding-state interface is disabled")
+            return False
+        from heracles_ros_interfaces.srv import UpdateHoldingState
+
         req = UpdateHoldingState.Request()
         req.is_holding = is_holding
         req.id = object_id
@@ -408,7 +422,11 @@ class SpotExecutorRos(Node):
         assert output_dir != ""
 
         self.feedback_collector = RosFeedbackCollector(self.odom_frame, output_dir)
-        self.feedback_collector.register_publishers(self)
+        self.declare_parameter("enable_manipulation_interfaces", False)
+        self.feedback_collector.register_publishers(
+            self,
+            self.get_parameter("enable_manipulation_interfaces").value,
+        )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -542,7 +560,8 @@ class SpotExecutorRos(Node):
             assert bdai_username != ""
             assert bdai_password != ""
             self.get_logger().info("About to initialize Spot")
-            self.get_logger().info(f"{bdai_username=}, {bdai_password=}, {spot_ip=}")
+            # Never emit the Spot password to ROS logs.
+            self.get_logger().info(f"{bdai_username=}, {spot_ip=}")
             self.spot_interface = Spot(
                 username=bdai_username,
                 password=bdai_password,
@@ -612,6 +631,16 @@ class SpotExecutorRos(Node):
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
+        self.declare_parameter("enable_live_approval", False)
+        if self.get_parameter("enable_live_approval").value:
+            from spot_tools_ros.live_approval import LiveApproval
+            self.live_approval = LiveApproval(self, self.feedback_collector)
+            self.feedback_collector.bounding_box_detection_feedback = self.live_approval.pick
+            self.feedback_collector.placement_feedback = self.live_approval.place
+        self.live_cancel_sub = self.create_subscription(
+            String, "~/live_cancel", self.cancel_live, 10
+        )
+
         self.action_sequence_sub = self.create_subscription(
             ActionSequenceMsg,
             "~/action_sequence_subscriber",
@@ -675,6 +704,30 @@ class SpotExecutorRos(Node):
         msg.faults = [str(f) for f in guards["faults"]]
         msg.notes = self.status_str
         self.runtime_guards_pub.publish(msg)
+
+    def cancel_live(self, msg):
+        # Do not block the ROS callback waiting for a skill to finish.
+        self.spot_executor.keep_going = False
+        self.feedback_collector.break_out_of_waiting_loop = True
+        try:
+            from bosdyn.client.robot_command import RobotCommandBuilder
+            self.spot_interface.command_client.robot_command(RobotCommandBuilder.stop_command())
+        except Exception as exc:
+            self.get_logger().error(f"Could not send stop command: {exc}")
+            return
+        plan_id = msg.data or self.feedback_collector.current_plan_id
+        worker = self.background_thread
+        def acknowledge():
+            if worker is not None:
+                worker.join()
+            response = ActionResultMsg()
+            response.header.stamp = self.get_clock().now().to_msg()
+            response.plan_id = plan_id
+            response.robot_name = self.feedback_collector.current_robot_name
+            response.status = "PREEMPTED"
+            response.detail = "stop sent and execution worker terminated"
+            self.feedback_collector.action_result_pub.publish(response)
+        threading.Thread(target=acknowledge, daemon=True).start()
 
     def process_action_sequence(self, msg):
         def process_sequence():

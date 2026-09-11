@@ -107,8 +107,47 @@ def force_stow_arm(manipulation_client, state_client, command_client):
     block_until_arm_arrives(command_client, cmd_id)
 
 
-def object_place(spot, semantic_class="bag", position=None):
-    """Drop a grasped object."""
+
+def place_at_point(spot, position, cancelled):
+    """Stationary-base placement; never release if positioning fails."""
+    from bosdyn.client.frame_helpers import BODY_FRAME_NAME
+    point = np.asarray(position, dtype=float)
+    if point.shape != (3,) or not np.isfinite(point).all():
+        raise ValueError("invalid placement target")
+    if spot.is_fake:
+        return not cancelled()
+    state = spot.state_client.get_robot_state()
+    if not state.manipulator_state.is_gripper_holding_item:
+        raise RuntimeError("robot is not holding an object")
+    from bosdyn.client.frame_helpers import get_a_tform_b, HAND_FRAME_NAME
+    orientation = get_a_tform_b(state.kinematic_state.transforms_snapshot,
+                               BODY_FRAME_NAME, HAND_FRAME_NAME).rot
+    def move(target):
+        if cancelled():
+            raise RuntimeError("placement cancelled")
+        cmd = RobotCommandBuilder.arm_pose_command(
+            *map(float, target), orientation.w, orientation.x, orientation.y,
+            orientation.z, BODY_FRAME_NAME, 2.0)
+        command_id = spot.command_client.robot_command(cmd)
+        if not block_until_arm_arrives(spot.command_client, command_id, 5.0):
+            raise RuntimeError("arm did not reach approved placement pose")
+        if cancelled():
+            raise RuntimeError("placement cancelled")
+    above = point + [0, 0, .1]
+    move(above)
+    move(point)
+    if cancelled():
+        raise RuntimeError("placement cancelled before release")
+    open_gripper(spot)
+    move(above)
+    stow_arm(spot)
+    close_gripper(spot)
+    return True
+
+def object_place(spot, semantic_class="bag", position=None, cancelled=lambda: False):
+    """Place at an approved body-frame point, or retain legacy drop behavior."""
+    if position is not None:
+        return place_at_point(spot, position, cancelled)
 
     if spot.is_fake:
         return True

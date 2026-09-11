@@ -11,6 +11,18 @@
   <depend>python3-skimage</depend>
   <depend>python3-opengl</depend>
   <depend>python3-pygame</depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>robot_executor_interface</exec_depend>
+  <exec_depend>robot_executor_interface_ros</exec_depend>
+  <exec_depend>robot_executor_msgs</exec_depend>
+  <exec_depend>ros_system_monitor_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>

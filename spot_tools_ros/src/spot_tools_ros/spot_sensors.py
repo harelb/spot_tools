@@ -17,8 +17,11 @@ from bosdyn.client.math_helpers import Quat, SE3Pose
 from bosdyn.client.robot_state import RobotStateClient
 from nav_msgs.msg import Odometry
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from ros_system_monitor_msgs.msg import NodeInfoMsg
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
 
 SpotImage = image_pb2.Image
@@ -76,8 +79,27 @@ def _prefix_frame(tf_prefix, frame_id):
 
 def _get_param(node, name, default):
     node.declare_parameter(name, default)
-    value = node.get_parameter(name).get_parameter_value()
-    return value
+    try:
+        return node.get_parameter(name).get_parameter_value()
+    except ParameterUninitializedException:
+        # ROS 2 parses an empty YAML sequence (``name: []``) as NOT_SET because
+        # YAML carries no element type.  Recover the intended array type from
+        # this parameter's non-empty default so callers can deliberately turn
+        # off a list-valued feature, such as all built-in Spot cameras.
+        if not isinstance(default, (list, tuple)):
+            raise
+
+        parameter_type = Parameter.Type.from_parameter_value(default)
+        result = node.set_parameters(
+            [Parameter(name, type_=parameter_type, value=[])]
+        )[0]
+        if not result.successful:
+            raise RuntimeError(
+                f"Failed to initialize empty array parameter '{name}': "
+                f"{result.reason}"
+            )
+
+        return node.get_parameter(name).get_parameter_value()
 
 
 def _get_local_time(robot, robot_stamp):
@@ -355,6 +377,13 @@ class SpotClientNode(Node):
         self._static_pub = tf2_ros.StaticTransformBroadcaster(self)
         self._odom_pub = self.create_publisher(Odometry, "odom", 10)
         self._joint_pub = self.create_publisher(JointState, "joint_states", 10)
+        self._heartbeat_pub = self.create_publisher(NodeInfoMsg, "~/node_status", 1)
+        self._last_state_update_ns = None
+        self._last_state_error = None
+        self._max_state_age_s = self._get_param(
+            "max_state_age_s", 1.0
+        ).double_value
+        self._heartbeat_timer = self.create_timer(0.5, self._heartbeat_callback)
 
         self._static_tfs = []
         self._static_seen = {}
@@ -365,8 +394,14 @@ class SpotClientNode(Node):
             tf_pub_period_s, self._publish_transforms, callback_group=tf_group
         )
 
-        cam_poll_period_s = self._get_param("camera_poll_period_s", 0.05).double_value
-        self._camera_timer = self.create_timer(cam_poll_period_s, self._camera_callback)
+        self._camera_timer = None
+        if self._cameras:
+            cam_poll_period_s = self._get_param(
+                "camera_poll_period_s", 0.05
+            ).double_value
+            self._camera_timer = self.create_timer(
+                cam_poll_period_s, self._camera_callback
+            )
 
         state_group = MutuallyExclusiveCallbackGroup()
         state_poll_period_s = self._get_param("state_poll_period_s", 0.01).double_value
@@ -519,12 +554,16 @@ class SpotClientNode(Node):
             cam.publish(self.get_logger(), self._robot, rgb, depth)
 
     def _state_callback(self):
-        """Poll Spot for new image messages and publish."""
+        """Poll Spot for robot state and publish it."""
         try:
             state = self._state_client.get_robot_state()
         except Exception as e:
+            self._last_state_error = str(e)
             self.get_logger().error(f"State request failed: {e}")
             return
+
+        self._last_state_update_ns = self.get_clock().now().nanoseconds
+        self._last_state_error = None
 
         pos_state = state.kinematic_state
         stamp = _get_local_time(self._robot, pos_state.acquisition_timestamp)
@@ -544,6 +583,32 @@ class SpotClientNode(Node):
 
         self._publish_odom(stamp, pos_state)
         self._publish_joints(stamp, pos_state)
+
+    def _heartbeat_callback(self):
+        msg = NodeInfoMsg()
+        msg.nickname = "spot_sensor_node"
+        msg.node_name = self.get_fully_qualified_name()
+
+        if self._last_state_update_ns is None:
+            msg.status = NodeInfoMsg.STARTUP
+            msg.notes = "Waiting for the first Spot robot-state response"
+        else:
+            age_s = (
+                self.get_clock().now().nanoseconds - self._last_state_update_ns
+            ) * 1.0e-9
+            if age_s > self._max_state_age_s:
+                msg.status = NodeInfoMsg.ERROR
+                detail = (
+                    f"; last request error: {self._last_state_error}"
+                    if self._last_state_error
+                    else ""
+                )
+                msg.notes = f"Spot robot state is stale ({age_s:.2f} s){detail}"
+            else:
+                msg.status = NodeInfoMsg.NOMINAL
+                msg.notes = "Spot state, odometry, joints, and TF are active"
+
+        self._heartbeat_pub.publish(msg)
 
     def _publish_odom(self, stamp, state):
         edge = state.transforms_snapshot.child_to_parent_edge_map.get("vision")
