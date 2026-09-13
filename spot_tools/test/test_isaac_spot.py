@@ -116,3 +116,36 @@ def test_failed_action_does_not_execute_dependent_action(monkeypatch):
     executor.process_action_sequence(ActionSequence('plan','hamilton',[first,second]),feedback)
     assert len(calls)==3 and all(c is first for c in calls)
     assert results==[(0,'FAILED')]
+
+
+def test_real_pick_action_scopes_auxiliary_cameras(monkeypatch):
+    import spot_executor.spot_executor as module
+    from robot_executor_interface.action_descriptions import Pick
+    import numpy as np
+    class CameraTransport:
+        def __init__(self):
+            self.active = False
+            self.events = []
+        def call(self, method, **args):
+            if method == 'pick_cameras':
+                self.active = args['enabled']
+                self.events.append(self.active)
+                return {'active': self.active}
+            if method == 'health':
+                return {'pick_camera_ready': self.active}
+            raise NotImplementedError(method)
+    transport = CameraTransport()
+    spot = IsaacSpot(transport=transport)
+    executor = module.SpotExecutor(spot, object(), None, None,
+                                  pick_image_source='front_zed_color_image')
+    def grasp(interface, detector, **kwargs):
+        assert interface is spot and not interface.is_fake and transport.active
+        assert kwargs['image_source'] == 'front_zed_color_image'
+        raise RuntimeError('injected grasp failure')
+    monkeypatch.setattr(module, 'object_grasp', grasp)
+    feedback = SimpleNamespace(print=lambda *args: None)
+    with pytest.raises(RuntimeError, match='injected grasp failure'):
+        executor.execute_pick(Pick(frame='vision', object_class='mug', robot_point=np.zeros(3),
+                                   object_point=np.ones(3), object_id='o1'), feedback)
+    assert transport.events == [True, False]
+    assert transport.active is False
