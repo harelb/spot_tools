@@ -4,6 +4,8 @@ Source the isolated ROS environment before running. Starts the production sensor
 publisher, validates matching RGB/depth/calibration messages, and records loss.
 """
 import argparse
+import hashlib
+import os
 import json
 import subprocess
 import sys
@@ -91,6 +93,13 @@ def main():
                           incomplete_observations=len(union) - len(complete),
                           observation_stamps_ns=[s for s, _ in complete],
                           receipt_elapsed_s=[t for _, t in complete])
+            result['rmw_implementation'] = rclpy.utilities.get_rmw_implementation_identifier()
+            result['transport_configs'] = {
+                key: dict(path=os.environ[key], sha256=hashlib.sha256(Path(os.environ[key]).read_bytes()).hexdigest())
+                for key in ('ZENOH_SESSION_CONFIG_URI', 'ZENOH_ROUTER_CONFIG_URI', 'FASTRTPS_DEFAULT_PROFILES_FILE')
+                if os.environ.get(key)
+            }
+            result['ros_domain_id'] = os.environ.get('ROS_DOMAIN_ID')
             result['passed'] = len(complete) >= 20 and len(complete) / max(1, len(union)) >= .98
             args.output.write_text(json.dumps(result, indent=2) + '\n')
             print(json.dumps({k: v for k, v in result.items() if not isinstance(v, list)}), flush=True)
