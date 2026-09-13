@@ -28,7 +28,9 @@ def waypoints_to_path(fixed_frame, waypoints):
         p.pose.position.y = w[1]
         p.pose.position.z = 0.0
 
-        if wnext is not None:
+        if len(w) == 3:
+            q = quaternion_from_euler(0, 0, float(w[2]))
+        elif wnext is not None:
             d_next = wnext[:2] - w[:2]
             theta = np.arctan2(d_next[1], d_next[0])
             q = quaternion_from_euler(0, 0, theta)

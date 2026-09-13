@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+from contextlib import nullcontext
 
 import bosdyn.client.util
 import cv2
@@ -26,6 +27,10 @@ from spot_executor.stitch_front_images import stitch, stitch_live, stitch_RGB
 
 
 class Spot:
+    def pick_camera_session(self):
+        """Hardware cameras are already available; simulators may render on demand."""
+        return nullcontext()
+
     def __init__(
         self,
         username="user",

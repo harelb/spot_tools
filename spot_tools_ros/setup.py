@@ -64,6 +64,8 @@ setup(
     entry_points={
         "console_scripts": [
             "spot_executor_node = spot_tools_ros.spot_executor_ros:main",
+            "isaac_spot_executor = spot_tools_ros.isaac_executor:main",
+            "isaac_spot_sensors = spot_tools_ros.isaac_sensors:main",
             "spot_twist_node = spot_tools_ros.spot_twist_node:main",
             "spot_sensor_node = spot_tools_ros.spot_sensors:main",
             "fake_occupancy_publisher = spot_tools_ros.fake_occupancy_publisher:main",

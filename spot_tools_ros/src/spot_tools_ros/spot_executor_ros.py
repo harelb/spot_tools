@@ -352,10 +352,10 @@ class RosFeedbackCollector:
 def resolve_spot_interface(spot_interface: str, use_fake_spot_interface: bool) -> str:
     """Back-compat resolution: explicit spot_interface wins; the legacy
     use_fake_spot_interface flag maps to 'fake'."""
-    if spot_interface not in ("", "real", "fake", "sim"):
+    if spot_interface not in ("", "real", "spot", "fake", "sim", "isaac"):
         raise ValueError(f"Invalid spot_interface: {spot_interface}")
     if spot_interface:
-        return spot_interface
+        return "real" if spot_interface == "spot" else spot_interface
     return "fake" if use_fake_spot_interface else "real"
 
 
@@ -439,6 +439,9 @@ class SpotExecutorRos(Node):
         interface = resolve_spot_interface(
             self.get_parameter("spot_interface").value, use_fake_spot_interface
         )
+        locked_backend = os.environ.get("SPOT_TOOLS_BACKEND_LOCK")
+        if locked_backend and interface != locked_backend:
+            raise RuntimeError(f"launch restricts hardware backend to {locked_backend!r}")
 
         # mid-level planner parameters
         self.declare_parameter("mid_level_planner_type", "identity")
@@ -555,6 +558,15 @@ class SpotExecutorRos(Node):
             )
             self.spot_ros_interface.attach(self.spot_interface)
 
+        elif interface == "isaac":
+            from spot_executor.isaac_spot import IsaacSpot
+            self.declare_parameter("isaac_endpoint", "http://127.0.0.1:9250")
+            if use_fake_path_plan or use_fake_spot_interface:
+                raise ValueError("Isaac parity requires the real executor and path planner")
+            self.spot_interface = IsaacSpot(self.get_parameter("isaac_endpoint").value)
+            # Sensor/TF ownership belongs to the Isaac bridge, never FakeSpotRos.
+            self.spot_ros_interface = None
+
         elif interface == "real":
             assert spot_ip != ""
             assert bdai_username != ""
@@ -628,6 +640,7 @@ class SpotExecutorRos(Node):
             self.feedback_collector,
             use_fake_path_plan,
             follow_timeout_per_meter,
+            self.declare_parameter("pick_image_source", "frontleft_fisheye_image").value,
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 

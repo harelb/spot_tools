@@ -3,6 +3,7 @@
 import time
 
 import numpy as np
+from bosdyn.api import gripper_command_pb2
 from bosdyn.client import math_helpers
 from bosdyn.client.frame_helpers import (
     BODY_FRAME_NAME,
@@ -44,7 +45,8 @@ def move_hand_to_relative_pose(spot, body_tform_goal: math_helpers.SE3Pose) -> N
     cmd_id = robot_command_client.robot_command(full_cmd)
 
     # Wait until the arm arrives at the goal.
-    block_until_arm_arrives(robot_command_client, cmd_id, 2.0)
+    if not block_until_arm_arrives(robot_command_client, cmd_id, 2.0):
+        raise RuntimeError("arm did not reach requested pose")
 
 
 def gaze_at_relative_pose(
@@ -72,7 +74,8 @@ def gaze_at_relative_pose(
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
     # Wait until the arm arrives at the goal.
-    block_until_arm_arrives(robot_command_client, cmd_id, duration)
+    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+        raise RuntimeError("arm command stalled, expired or was cancelled")
     time.sleep(1.0)
 
 
@@ -88,7 +91,8 @@ def gaze_at_vision_pose(spot, gaze_target, duration=2, stow_after=False):
     # Send the request.
     cmd_id = robot_command_client.robot_command(command=cmd)
     # Wait until the arm arrives at the goal.
-    block_until_arm_arrives(robot_command_client, cmd_id, duration)
+    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+        raise RuntimeError("arm command stalled, expired or was cancelled")
     time.sleep(1.0)
     if stow_after:
         stow_arm(spot)
@@ -106,7 +110,8 @@ def stow_arm(spot, duration: float = 2.0) -> None:
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
     # Wait until the arm arrives at the goal.
-    block_until_arm_arrives(robot_command_client, cmd_id, duration)
+    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+        raise RuntimeError("arm command stalled, expired or was cancelled")
     return True
 
 
@@ -121,7 +126,8 @@ def arm_to_carry(spot, duration: float = 2.0) -> None:
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
     # Wait until the arm arrives at the goal.
-    block_until_arm_arrives(robot_command_client, cmd_id, duration)
+    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+        raise RuntimeError("arm command stalled, expired or was cancelled")
     return True
 
 
@@ -231,8 +237,20 @@ def change_gripper(spot, fraction: float, duration: float = 2.0) -> None:
     cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(fraction)
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
-    # Wait until the arm arrives at the goal.
-    block_until_arm_arrives(robot_command_client, cmd_id, duration)
+    # Gripper commands have gripper feedback, never arm feedback.
+    deadline = time.monotonic() + duration
+    while time.monotonic() < deadline:
+        reply = robot_command_client.robot_command_feedback(cmd_id)
+        feedback = reply.feedback.synchronized_feedback.gripper_command_feedback
+        if feedback.HasField("claw_gripper_feedback"):
+            status = feedback.claw_gripper_feedback.status
+            completed = status == gripper_command_pb2.ClawGripperCommand.Feedback.STATUS_AT_GOAL
+            contacting = (fraction == 0 and status ==
+                          gripper_command_pb2.ClawGripperCommand.Feedback.STATUS_APPLYING_FORCE)
+            if completed or contacting:
+                return
+        time.sleep(0.05)
+    raise RuntimeError("gripper did not reach the requested state")
 
 
 def open_gripper(spot, duration: float = 2.0) -> None:

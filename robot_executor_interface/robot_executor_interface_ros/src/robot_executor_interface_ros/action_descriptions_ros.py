@@ -39,7 +39,6 @@ def _(action: ActionSequence):
     msg.robot_name = action.robot_name
     msg.header.stamp = gtm()
 
-    print([to_msg(a) for a in action.actions])
     msg.actions = [to_msg(a) for a in action.actions]
     return msg
 
@@ -168,6 +167,7 @@ def gaze_from_msg(msg):
 def _(action: Gaze):
     msg = ActionMsg()
     msg.action_type = msg.GAZE
+    msg.gaze_frame = action.frame
 
     msg.robot_point.x = action.robot_point[0]
     msg.robot_point.y = action.robot_point[1]
@@ -233,6 +233,7 @@ def pick_from_msg(msg):
 def _(action: Pick):
     msg = ActionMsg()
     msg.action_type = msg.PICK
+    msg.pick_frame = action.frame
 
     msg.robot_point.x = action.robot_point[0]
     msg.robot_point.y = action.robot_point[1]
@@ -297,6 +298,7 @@ def place_from_msg(msg):
 def _(action: Place):
     msg = ActionMsg()
     msg.action_type = msg.PLACE
+    msg.place_frame = action.frame
 
     msg.robot_point.x = action.robot_point[0]
     msg.robot_point.y = action.robot_point[1]
@@ -306,6 +308,7 @@ def _(action: Place):
     msg.object_point.y = action.object_point[1]
     msg.object_point.z = action.object_point[2]
 
+    msg.object_class = action.object_class
     msg.object_id = action.object_id
 
     return msg
@@ -339,3 +342,15 @@ def _(action: Place, marker_ns):
     m.points = [pt1, pt2]
 
     return [m]
+
+
+def to_msg_at(sequence, stamp):
+    """Use the caller's ROS clock while preserving the standard action serializer."""
+    msg = to_msg(sequence)
+    msg.header.stamp = stamp
+    for action in msg.actions:
+        if action.action_type == action.FOLLOW:
+            action.path.header.stamp = stamp
+            for pose in action.path.poses:
+                pose.header.stamp = stamp
+    return msg

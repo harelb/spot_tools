@@ -38,12 +38,15 @@ g_image_click = None
 g_image_display = None
 
 
-def wait_until_grasp_state_updates(grasp_override_command, robot_state_client):
+def wait_until_grasp_state_updates(grasp_override_command, robot_state_client, timeout=5.0):
     updated = False
     has_grasp_override = grasp_override_command.HasField("api_grasp_override")
     has_carry_state_override = grasp_override_command.HasField("carry_state_override")
 
+    deadline = time.monotonic() + timeout
     while not updated:
+        if time.monotonic() >= deadline:
+            raise RuntimeError("grasp/carry state did not update")
         robot_state = robot_state_client.get_robot_state()
 
         grasp_state_updated = (
@@ -104,7 +107,8 @@ def force_stow_arm(manipulation_client, state_client, command_client):
 
     robot_cmd = RobotCommandBuilder.arm_stow_command()
     cmd_id = command_client.robot_command(robot_cmd)
-    block_until_arm_arrives(command_client, cmd_id)
+    if not block_until_arm_arrives(command_client, cmd_id, 5.0):
+        raise RuntimeError("loaded arm failed to stow")
 
 
 
@@ -203,11 +207,22 @@ def object_grasp(
     attempts = 0
     success = False
 
+    def cancelled():
+        return feedback is not None and bool(getattr(feedback, "break_out_of_waiting_loop", False))
+
+    def stop_manipulation():
+        spot.command_client.robot_command(RobotCommandBuilder.stop_command())
+
+    if cancelled():
+        return False
+
     # Set up the detector (e.g., for YOLOWorld, this may mean updating recognized classes)
     detector.set_up_detector(semantic_class)
 
     candidates = None
     while attempts < 2 and not success:
+        if cancelled():
+            return False
         attempts += 1
 
         if not user_input:
@@ -230,6 +245,8 @@ def object_grasp(
             detection_index = 0
             print("Found object centroid:", xy)
 
+    if cancelled():
+        return False
     if candidates is None:
         if feedback is not None:
             feedback.print(
@@ -266,11 +283,13 @@ def object_grasp(
             semantic_class,
         )
 
-        if approved is not None and not approved:
+        if not approved or cancelled():
             feedback.print("INFO", "User requested abort.")
             return False
 
         # Use selected camera image and pixel (panel always sends the correct selection)
+        if not isinstance(selected_index, int) or not 0 <= selected_index < len(candidates):
+            raise ValueError("approved camera candidate is invalid")
         image = candidates[selected_index].bosdyn_image
         xy = updated_xy
     else:
@@ -287,8 +306,16 @@ def object_grasp(
         image = candidates[detection_index].bosdyn_image
         xy = candidates[detection_index].detection_xy
 
+    if cancelled():
+        return False
+    if (xy is None or len(xy) != 2 or not np.isfinite(xy).all()
+            or not 0 <= xy[0] < image.shot.image.cols
+            or not 0 <= xy[1] < image.shot.image.rows):
+        raise ValueError("approved pick pixel is outside its camera snapshot")
     pick_vec = geometry_pb2.Vec2(x=xy[0], y=xy[1])
     stow_arm(spot)
+    if cancelled():
+        return False
 
     # Build the proto
     grasp = manipulation_api_pb2.PickObjectInImage(
@@ -311,17 +338,22 @@ def object_grasp(
         manipulation_api_request=grasp_request
     )
 
-    loop_timer = time.time()
+    loop_timer = time.monotonic()
 
     # Reset success --> agent is successful only if it detects the object and picks it up
     success = False
+    response = None
     # Get feedback from the robot
     while True:
-        current_time = time.time()
+        if cancelled():
+            stop_manipulation()
+            return False
+        current_time = time.monotonic()
         if current_time - loop_timer > 15:
             if feedback is not None:
                 feedback.print("INFO", "The pick skill timed out!")
             print("The pick skill timed out!")
+            stop_manipulation()
             break
         feedback_request = manipulation_api_pb2.ManipulationApiFeedbackRequest(
             manipulation_cmd_id=cmd_response.manipulation_cmd_id
@@ -352,8 +384,12 @@ def object_grasp(
         if response.current_state == manipulation_api_pb2.MANIP_STATE_GRASP_SUCCEEDED:
             success = True
             break
+        time.sleep(0.05)
 
-    if feedback is not None:
+    if cancelled():
+        stop_manipulation()
+        return False
+    if feedback is not None and response is not None:
         current_state = manipulation_api_pb2.ManipulationFeedbackState.Name(
             response.current_state
         )
@@ -385,8 +421,9 @@ def object_grasp(
     # Move the arm to a carry position.
     print("Grasp finished, carrying object.")
     carry_cmd = RobotCommandBuilder.arm_carry_command()
-    spot.command_client.robot_command(carry_cmd)
-    time.sleep(1)
+    carry_id = spot.command_client.robot_command(carry_cmd)
+    if not block_until_arm_arrives(spot.command_client, carry_id, 5.0):
+        raise RuntimeError("grasped object but failed to reach carry pose")
 
     print("Force stowing arm!")
     force_stow_arm(manipulation_api_client, robot_state_client, spot.command_client)
@@ -399,6 +436,9 @@ def object_grasp(
         )
         move_hand_to_relative_pose(spot, body_tform_goal)
         time.sleep(1)
+
+    if not robot_state_client.get_robot_state().manipulator_state.is_gripper_holding_item:
+        raise RuntimeError("object no longer held after carry")
 
     print("Finished grasp.")
 

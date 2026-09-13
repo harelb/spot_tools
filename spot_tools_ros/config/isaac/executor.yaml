@@ -1,0 +1,24 @@
+/**:
+  ros__parameters:
+    spot_interface: isaac
+    isaac_endpoint: http://127.0.0.1:9250
+    use_sim_time: true
+    use_fake_spot_interface: false
+    use_fake_path_plan: false
+    odom_frame: vision
+    body_frame: hamilton/body
+    output_dir: /tmp/isaac-spot-executor
+    mid_level_planner_type: astar
+    occupancy_inflation_radius: 0.2
+    use_cost_map: true
+    cost_map_safe_distance: 0.5
+    cost_map_nearest_obstacle_cost: 5.0
+    follower_lookahead: 0.5
+    goal_tolerance: 0.1
+    follow_timeout_per_meter: 15.0
+    pick_image_source: front_zed_color_image
+    enable_live_approval: true
+    # Enable only with validated arm/grasp feedback; backend currently refuses it.
+    enable_manipulation_interfaces: false
+    detector_model_path: ''
+    detector_confidence: 0.25

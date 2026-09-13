@@ -1,5 +1,6 @@
 import threading
 import time
+from contextlib import nullcontext
 
 import numpy as np
 import skimage as ski
@@ -151,6 +152,7 @@ class SpotExecutor:
         feedback=None,
         use_fake_path_planner=False,
         follow_timeout_per_meter=6.0,
+        pick_image_source="frontleft_fisheye_image",
     ):
         self.debug = False
         self.spot_interface = spot_interface
@@ -158,6 +160,7 @@ class SpotExecutor:
         self.follower_lookahead = follower_lookahead
         self.goal_tolerance = goal_tolerance
         self.detector = detector
+        self.pick_image_source = pick_image_source
         self.keep_going = True
         self.processing_action_sequence = False
         self.mid_level_planner = planner
@@ -273,6 +276,10 @@ class SpotExecutor:
                             "" if success
                             else f"gave up after {inner_loop_attempts + 1} attempts",
                         )
+                        if not success:
+                            # Dependent actions cannot execute after their prerequisite
+                            # failed. Replanning requires a newly reviewed sequence.
+                            break
                         ix += 1
                         inner_loop_attempts = 0
                     else:
@@ -317,14 +324,16 @@ class SpotExecutor:
         if callable(symbolic_grasp):
             success = symbolic_grasp()
         else:
-            success = object_grasp(
-                self.spot_interface,
-                self.detector,
-                image_source="frontleft_fisheye_image",
-                user_input=False,
-                semantic_class=command.object_class,
-                feedback=feedback,
-            )
+            session = getattr(self.spot_interface, "pick_camera_session", nullcontext)
+            with session():
+                success = object_grasp(
+                    self.spot_interface,
+                    self.detector,
+                    image_source=self.pick_image_source,
+                    user_input=False,
+                    semantic_class=command.object_class,
+                    feedback=feedback,
+                )
 
         if self.debug and not callable(symbolic_grasp):
             success, debug_images = success
@@ -370,7 +379,7 @@ class SpotExecutor:
         # by the transform_lookup function.
         t, r = self.transform_lookup("<spot_vision_frame>", command.frame)
         command_to_send = transform_command_frame(
-            t, r, command.path2d, feedback=feedback
+            t, r, command.path2d.copy(), feedback=feedback
         )
 
         path_distance = np.sum(
