@@ -54,12 +54,13 @@ def decode_rgbd(payload, session):
 
 
 class SensorClient:
-    def __init__(self, endpoint, source='front_zed_color_image'):
+    def __init__(self, endpoint, source='front_zed_color_image', mask_robot=False):
         from spot_executor.isaac_spot import IsaacTransport
         self.transport=IsaacTransport(endpoint)
         if 'raw_rgbd' not in self.transport.capabilities:
             raise RuntimeError('Isaac does not advertise raw RGB-D')
         self.source=source
+        self.mask_robot=mask_robot
         self.index=-1
         self.stamp=-1
 
@@ -76,6 +77,12 @@ class SensorClient:
         if meta['source'] != self.source or meta['frame_index']<=self.index or meta['timestamp_ns']<=self.stamp:
             raise ValueError('stale, reordered or different-source observation')
         self.index,self.stamp=meta['frame_index'],meta['timestamp_ns']
+        if self.mask_robot:
+            from .robot_self_filter import mask_robot_depth
+            depth,count=mask_robot_depth(meta,result[2])
+            meta=dict(meta,mapping_self_filter=dict(masked_pixels=count,
+                policy='Zero measured depth inside capture-time robot CAD bounds; no background filling'))
+            return meta,result[1],depth
         return result
 
 
@@ -101,7 +108,7 @@ def main():
     from bosdyn.api import robot_state_pb2
     from std_msgs.msg import String
     from nav_msgs.msg import OccupancyGrid
-    client=SensorClient(args.endpoint,args.source)
+    client=SensorClient(args.endpoint,args.source,mask_robot=True)
     rclpy.init();node=Node('isaac_spot_sensors',namespace=args.robot)
     sensor='mapping'
     prefix=f'/{args.robot}/{sensor}'
@@ -185,7 +192,8 @@ def main():
                 receipt=dict(ready=True, session_id=client.transport.session,
                     updated_at=time.time(), published=published, elapsed_s=time.monotonic()-started,
                     last_source_index=client.index, timestamp_ns=client.stamp,
-                    rmw=rclpy.get_rmw_implementation_identifier(), source=args.source)
+                    rmw=rclpy.get_rmw_implementation_identifier(), source=args.source,
+                    self_filter=meta.get('mapping_self_filter'))
                 temp=args.status_file.with_suffix('.tmp')
                 temp.write_text(json.dumps(receipt));temp.replace(args.status_file)
             if published%30==0:
