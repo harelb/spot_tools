@@ -628,6 +628,7 @@ class SpotExecutorRos(Node):
             yolo_world_path=detector_model_path,
             conf=detector_confidence,
             class_synonyms=detector_class_synonyms,
+            load_on_demand=self.declare_parameter("detector_load_on_demand", False).value,
         )
 
         self.spot_executor = se.SpotExecutor(
@@ -642,6 +643,8 @@ class SpotExecutorRos(Node):
             follow_timeout_per_meter,
             self.declare_parameter("pick_image_source", "frontleft_fisheye_image").value,
         )
+        if interface == "isaac":
+            self.spot_interface.take_lease()
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
         self.declare_parameter("enable_live_approval", False)
@@ -661,6 +664,10 @@ class SpotExecutorRos(Node):
             10,
         )
 
+        self.manual_sequence_sub = self.create_subscription(
+            ActionSequenceMsg, '~/manual_action_sequence',
+            lambda msg: self.process_action_sequence(msg, mode='manual'), 10)
+
         self.heartbeat_pub = self.create_publisher(NodeInfoMsg, "~/node_status", 1)
         # PR B8: volatile platform-state snapshot for the planner's dispatch
         # gate. Published on every 10th heartbeat tick (~1 Hz at the 0.1 s
@@ -674,6 +681,15 @@ class SpotExecutorRos(Node):
         self.timer = self.create_timer(
             timer_period_s, self.hb_callback, callback_group=heartbeat_timer_group
         )
+
+        self.manual_server = None
+        port = self.declare_parameter("manual_port", 0).value
+        if port:
+            from spot_tools_ros.manual_server import ManualServer
+            self.manual_server = ManualServer(self, port,
+                self.declare_parameter("manual_token_file", "").value,
+                self.declare_parameter("run_id", "").value,
+                self.declare_parameter("episode_id", "").value)
 
     def hb_callback(self):
         msg = NodeInfoMsg()
@@ -721,6 +737,7 @@ class SpotExecutorRos(Node):
     def cancel_live(self, msg):
         # Do not block the ROS callback waiting for a skill to finish.
         self.spot_executor.keep_going = False
+        self.spot_executor.cancel_event.set()
         self.feedback_collector.break_out_of_waiting_loop = True
         try:
             from bosdyn.client.robot_command import RobotCommandBuilder
@@ -742,29 +759,50 @@ class SpotExecutorRos(Node):
             self.feedback_collector.action_result_pub.publish(response)
         threading.Thread(target=acknowledge, daemon=True).start()
 
-    def process_action_sequence(self, msg):
-        def process_sequence():
-            self.status_str = "Processing action sequence"
-            self.get_logger().info("Starting action sequence")
-            sequence = from_msg(msg)
-
-            # PR B5: every per-action result echoes the dispatched
-            # sequence's identity.
-            self.feedback_collector.current_plan_id = msg.plan_id
-            self.feedback_collector.current_robot_name = msg.robot_name
-
-            self.spot_executor.process_action_sequence(
-                sequence, self.feedback_collector
-            )
-            self.get_logger().info("Finished execution action sequence.")
-            self.status_str = "Idle"
-
-        if self.background_thread is not None and self.background_thread.is_alive():
-            self.spot_executor.terminate_sequence(self.feedback_collector)
-
-        self.feedback_collector.break_out_of_waiting_loop = False
-        self.background_thread = threading.Thread(target=process_sequence, daemon=False)
-        self.background_thread.start()
+    def process_action_sequence(self, msg, mode="planned"):
+        from contextlib import nullcontext
+        ownership = self.manual_server.control.lock if self.manual_server else nullcontext()
+        with ownership:
+            if self.manual_server is not None and (self.manual_server.control.mode != mode or self.manual_server.control.compute_token):
+                response = ActionResultMsg()
+                response.plan_id, response.robot_name = msg.plan_id, msg.robot_name
+                response.status = 'FAILED'
+                response.detail = f'{self.manual_server.control.mode} control or a compute reservation owns motion; switch to {mode} and review again'
+                self.feedback_collector.action_result_pub.publish(response)
+                return
+            if self.background_thread is not None and self.background_thread.is_alive():
+                # Never preempt an active sequence by silently replacing it.
+                response = ActionResultMsg()
+                response.plan_id, response.robot_name = msg.plan_id, msg.robot_name
+                response.status = 'FAILED'
+                response.detail = 'Another action sequence is active; cancel and wait for acknowledgement'
+                self.feedback_collector.action_result_pub.publish(response)
+                return
+            self.feedback_collector.break_out_of_waiting_loop = False
+            self.spot_executor.cancel_event.clear()
+            self.spot_executor.processing_action_sequence = True
+            def process_sequence():
+                self.status_str = 'Processing action sequence'
+                self.feedback_collector.current_plan_id = msg.plan_id
+                self.feedback_collector.current_robot_name = msg.robot_name
+                try:
+                    transport=getattr(self.spot_interface,'transport',None)
+                    if transport is not None and hasattr(transport,'context'):
+                        transport.context.value={'plan_id':msg.plan_id,'origin':mode}
+                    sequence = from_msg(msg)
+                    self.spot_executor.process_action_sequence(sequence, self.feedback_collector)
+                except Exception as exc:
+                    response = ActionResultMsg()
+                    response.plan_id, response.robot_name = msg.plan_id, msg.robot_name
+                    response.status, response.detail = 'FAILED', str(exc)
+                    self.feedback_collector.action_result_pub.publish(response)
+                finally:
+                    if transport is not None and hasattr(transport,'context'):
+                        transport.context.value={}
+                    self.spot_executor.processing_action_sequence = False
+                    self.status_str = 'Idle'
+            self.background_thread = threading.Thread(target=process_sequence, daemon=True)
+            self.background_thread.start()
 
 
 def main(args=None):
@@ -779,9 +817,15 @@ def main(args=None):
             ros_executor.spin()
         finally:
             ros_executor.shutdown()
+            if node.manual_server is not None:
+                node.manual_server.close()
+            node.spot_executor.keep_going = False
+            node.feedback_collector.break_out_of_waiting_loop = True
+            node.spot_executor.lease_manager.close()
             node.destroy_node()
     finally:
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

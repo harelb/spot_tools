@@ -120,13 +120,25 @@ def follow_trajectory_continuous(
     end_pt = waypoints_list[-1, :2]
     t0 = time.time()
     rate = 10
+    def cancelled():
+        return bool(feedback is not None and getattr(feedback,'break_out_of_waiting_loop',False))
+
+    def stop():
+        spot.command_client.robot_command(RobotCommandBuilder.stop_command())
+
     # TODO: reactive loop, yeild out the loop to get info
     while 1:
+        if cancelled():
+            stop()
+            return False
         # if mid_level_planner is not None:
         # update path every (couple?) loop
         mlp_success, planning_output = mid_level_planner.plan_path(
             waypoints_list[:, :2]
         )
+        if cancelled():
+            stop()
+            return False
         path = planning_output.path_shapely
         path_wp = planning_output.path_waypoints_metric
         target_point_metric = planning_output.target_point_metric
@@ -140,6 +152,7 @@ def follow_trajectory_continuous(
                 "INFO", "Mid-level planner failed, following high-level path directly"
             )
             if time.time() - t0 > timeout:
+                stop()
                 return False
 
             path = shapely.LineString(waypoints_list[:, :2])
@@ -149,6 +162,7 @@ def follow_trajectory_continuous(
             # TODO: I think we need to tell Spot to stop?
             # TODO: Also, we should probably have a finer-grained
             # check about making progress
+            stop()
             return False
         tform_body_in_vision = spot.get_pose()
         distance_from_end = np.linalg.norm(
@@ -187,8 +201,14 @@ def follow_trajectory_continuous(
         )
         feedback.print("INFO", f"Navigating to waypoint {current_waypoint}")
 
-        navigate_to_absolute_pose(spot, current_waypoint, frame_name, stairs=stairs)
+        if cancelled():
+            stop()
+            return False
+        command_id=navigate_to_absolute_pose(spot, current_waypoint, frame_name, stairs=stairs)
         time.sleep(1 / rate)
+        # Read terminal hardware failures instead of repeatedly replacing a
+        # rejected/stalled motion while reporting that the action is running.
+        spot.command_client.robot_command_feedback(command_id)
     return True
 
 

@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import time
+import threading
 import uuid
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ class IsaacTransport:
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.session = None
+        self.context = threading.local()
         health = self.call("health")
         if health.get("protocol") != PROTOCOL or health.get("backend") != "isaac":
             raise ValueError("endpoint is not the Isaac hardware backend")
@@ -41,7 +43,8 @@ class IsaacTransport:
         self.capabilities = tuple(health.get("capabilities", ()))
 
     def call(self, method, **arguments):
-        data = json.dumps(dict(method=method, session_id=self.session, arguments=arguments),
+        data = json.dumps(dict(method=method, session_id=self.session, arguments=arguments,
+                               trace_context=getattr(self.context,'value',{})),
                           allow_nan=False).encode()
         request = Request(self.url + "/rpc", data=data,
                           headers={"Content-Type": "application/json"})

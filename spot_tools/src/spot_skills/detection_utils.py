@@ -29,6 +29,7 @@ class YOLODetector(Detector):
         yolo_world_path,
         conf: float = 0.25,
         class_synonyms: Optional[dict] = None,
+        load_on_demand: bool = False,
     ):
         super().__init__(spot)
 
@@ -53,11 +54,21 @@ class YOLODetector(Detector):
             key: value.lower() for key, value in (class_synonyms or {}).items()
         }
 
-        self.yolo_model = YOLOE(yolo_world_path)
-        custom_classes = ["", "bag", "cone", "pipe"]
-        prompt_classes = [self._to_prompt(cls) for cls in custom_classes]
-        self.yolo_model.set_classes(prompt_classes)
-        print("Set classes for YOLOWorld model.")
+        self._model_path = yolo_world_path
+        self._yolo_model = None
+        import threading
+        self._model_lock = threading.Lock()
+        if not load_on_demand:
+            self.yolo_model
+
+    @property
+    def yolo_model(self):
+        with self._model_lock:
+            if self._yolo_model is None:
+                model = YOLOE(self._model_path)
+                model.set_classes([self._to_prompt(cls) for cls in ["", "bag", "cone", "pipe"]])
+                self._yolo_model = model
+            return self._yolo_model
 
     def _to_prompt(self, semantic_class):
         """Translate a canonical semantic class name to the prompt phrase

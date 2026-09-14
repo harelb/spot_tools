@@ -228,3 +228,13 @@ def test_spot_executor_uses_symbolic_grasp_hook_without_camera():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_navigation_start_can_defer_detector_until_first_pick():
+    with patch('spot_skills.detection_utils.YOLOE', return_value=FakeYOLOE('weights.pt')) as load:
+        detector=YOLODetector(MagicMock(),'weights.pt',load_on_demand=True)
+        load.assert_not_called()
+        detector.set_up_detector('mug')
+        load.assert_called_once_with('weights.pt')
+        detector.set_up_detector('bottle')
+        load.assert_called_once()
