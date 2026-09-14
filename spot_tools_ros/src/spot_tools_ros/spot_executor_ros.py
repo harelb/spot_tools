@@ -95,6 +95,7 @@ class RosFeedbackCollector:
         self._clock = None
         self.current_plan_id = ""
         self.current_robot_name = ""
+        self.held_object_id = None
 
         self.output_dir = output_dir
 
@@ -293,9 +294,11 @@ class RosFeedbackCollector:
             fo.write("time,event\n")
 
     def set_robot_holding_state(self, is_holding: bool, object_id: str, timeout=5):
+        # Identity comes from the completed real skill; the separate live
+        # holding publisher confirms occupancy using current SDK state.
+        self.held_object_id = object_id if is_holding else None
         if self.holding_client is None:
-            self.logger.warning("Holding-state interface is disabled")
-            return False
+            return True
         from heracles_ros_interfaces.srv import UpdateHoldingState
 
         req = UpdateHoldingState.Request()
@@ -738,6 +741,20 @@ class SpotExecutorRos(Node):
         msg.faults = [str(f) for f in guards["faults"]]
         msg.notes = self.status_str
         self.runtime_guards_pub.publish(msg)
+        from std_msgs.msg import String
+        import json
+        if not hasattr(self, 'holding_state_pub'):
+            self.holding_state_pub = self.create_publisher(String, '~/holding_state', 1)
+        context=self.manual_server.control if self.manual_server else None
+        holding=bool(state.manipulator_state.is_gripper_holding_item)
+        if not holding:self.feedback_collector.held_object_id=None
+        self.holding_state_pub.publish(String(data=json.dumps(dict(
+            known=state.HasField('manipulator_state'),is_holding=holding,
+            object_id=self.feedback_collector.held_object_id if holding else None,
+            plan_id=self.feedback_collector.current_plan_id,
+            run_id=context.run_id if context else None,
+            episode_id=context.episode_id if context else None,
+            observed_at=time.time(),source='SDK state and completed skill identity'))))
 
     def cancel_live(self, msg):
         # Do not block the ROS callback waiting for a skill to finish.
