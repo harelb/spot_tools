@@ -127,6 +127,14 @@ def place_at_point(spot, position, cancelled):
     from bosdyn.client.frame_helpers import get_a_tform_b, HAND_FRAME_NAME
     orientation = get_a_tform_b(state.kinematic_state.transforms_snapshot,
                                BODY_FRAME_NAME, HAND_FRAME_NAME).rot
+    if getattr(spot, "preserve_grasp_placement_orientation", False):
+        from bosdyn.client.frame_helpers import VISION_FRAME_NAME
+        grasp_orientation = getattr(spot, "placement_grasp_orientation", None)
+        if grasp_orientation is None:
+            raise RuntimeError("Held object lacks an observed grasp orientation for placement")
+        vision_T_body = get_a_tform_b(state.kinematic_state.transforms_snapshot,
+                                     VISION_FRAME_NAME, BODY_FRAME_NAME)
+        orientation = vision_T_body.rot.inverse() * grasp_orientation
     def move(target):
         if cancelled():
             raise RuntimeError("placement cancelled")
@@ -144,6 +152,7 @@ def place_at_point(spot, position, cancelled):
     if cancelled():
         raise RuntimeError("placement cancelled before release")
     open_gripper(spot)
+    spot.placement_grasp_orientation = None
     move(above)
     stow_arm(spot)
     close_gripper(spot)
@@ -418,6 +427,15 @@ def object_grasp(
     )
     spot.command_client.robot_command(close_cmd)
     time.sleep(0.25)
+
+    # Preserve the observed post-grasp tool attitude before carry/stow rotates
+    # the object. This is proprioception, not simulator object identity or pose.
+    if getattr(spot, "preserve_grasp_placement_orientation", False):
+        from bosdyn.client.frame_helpers import get_a_tform_b, VISION_FRAME_NAME, HAND_FRAME_NAME
+        grasp_state = robot_state_client.get_robot_state()
+        spot.placement_grasp_orientation = get_a_tform_b(
+            grasp_state.kinematic_state.transforms_snapshot,
+            VISION_FRAME_NAME, HAND_FRAME_NAME).rot
 
     # Move the arm to a carry position.
     print("Grasp finished, carrying object.")

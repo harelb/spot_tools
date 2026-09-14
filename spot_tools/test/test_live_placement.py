@@ -52,3 +52,28 @@ def test_place_approaches_releases_and_retracts(monkeypatch):
     spot, calls = rig(monkeypatch)
     assert grasp_utils.place_at_point(spot, [0.5, 0, 0.2], lambda: False)
     assert calls == ["move", "move", "release", "move", "stow", "close"]
+
+
+def test_place_restores_observed_grasp_attitude_after_base_turn(monkeypatch):
+    import bosdyn.client.frame_helpers as frames
+    from bosdyn.client.math_helpers import Quat
+    spot,calls=rig(monkeypatch)
+    spot.preserve_grasp_placement_orientation=True
+    spot.placement_grasp_orientation=Quat.from_pitch(.7)
+    body=Quat.from_yaw(.5)
+    desired=body.inverse()*spot.placement_grasp_orientation
+    monkeypatch.setattr(frames,'get_a_tform_b',lambda snapshot,a,b:
+        SimpleNamespace(rot=body if b==frames.BODY_FRAME_NAME else Quat()))
+    commands=[]
+    spot.command_client.robot_command=lambda command:commands.append(command) or 1
+    assert grasp_utils.place_at_point(spot,[.5,0,.2],lambda:False)
+    actual=commands[0].synchronized_command.arm_command.arm_cartesian_command.pose_trajectory_in_task.points[0].pose.rotation
+    assert [actual.w,actual.x,actual.y,actual.z]==pytest.approx([desired.w,desired.x,desired.y,desired.z])
+    assert spot.placement_grasp_orientation is None
+
+
+def test_required_missing_grasp_attitude_fails_before_motion(monkeypatch):
+    spot,calls=rig(monkeypatch);spot.preserve_grasp_placement_orientation=True
+    with pytest.raises(RuntimeError,match='observed grasp orientation'):
+        grasp_utils.place_at_point(spot,[.5,0,.2],lambda:False)
+    assert not calls

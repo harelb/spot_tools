@@ -657,6 +657,8 @@ class SpotExecutorRos(Node):
             self.feedback_collector.bounding_box_detection_feedback = self.live_approval.pick
             self.feedback_collector.placement_feedback = self.live_approval.place
         verification_url = self.declare_parameter("placement_verification_url", "").value
+        self.spot_interface.preserve_grasp_placement_orientation = self.declare_parameter(
+            "preserve_grasp_placement_orientation", False).value
         if verification_url:
             import json
             from urllib.request import Request, urlopen
