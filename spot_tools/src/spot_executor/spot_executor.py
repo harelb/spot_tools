@@ -417,7 +417,8 @@ class SpotExecutor:
         path_distance = np.sum(
             np.linalg.norm(np.diff(command_to_send[:, :2], axis=0), axis=1)
         )
-        timeout = path_distance * self.follow_timeout_per_meter
+        from spot_skills.navigation_utils import navigation_timeout
+        timeout = navigation_timeout(command_to_send, self.follow_timeout_per_meter)
         feedback.print(
             "INFO",
             f"Using continous follower with params:\n\tlookahead: {self.follower_lookahead}\n\tgoal tolerance: {self.goal_tolerance}\n\ttimeout: {timeout}",

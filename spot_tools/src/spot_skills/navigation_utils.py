@@ -91,6 +91,18 @@ def navigate_to_absolute_pose(
     return cmd_id
 
 
+def navigation_timeout(path, seconds_per_meter):
+    """Allow short paths to settle and budget rotation even at zero distance."""
+    path=np.asarray(path,dtype=float)
+    if path.ndim!=2 or path.shape[1]!=3 or len(path)<1 or not np.isfinite(path).all():
+        raise ValueError('Navigation timeout requires finite x/y/yaw waypoints')
+    if not np.isfinite(seconds_per_meter) or seconds_per_meter<=0:
+        raise ValueError('Invalid navigation time budget')
+    distance=float(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1).sum())
+    yaw=np.diff(path[:,2]);rotation=float(abs(np.arctan2(np.sin(yaw),np.cos(yaw))).sum())
+    return max(15.,distance*seconds_per_meter+rotation*max(5.,seconds_per_meter/2))
+
+
 def follow_trajectory_continuous(
     spot,
     waypoints_list: ArrayLike,
