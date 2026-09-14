@@ -392,12 +392,17 @@ class SpotExecutor:
         feedback.print("INFO", "Executing `place` command")
         placement = getattr(feedback, "placement_feedback", None)
         position = placement(command.object_class) if placement else None
+        verifier = getattr(feedback, "placement_verifier", None)
+        verification = verifier.prepare(command.object_class, position) if verifier else None
         success = object_place(self.spot_interface, semantic_class=command.object_class,
                                position=position, cancelled=lambda: feedback.break_out_of_waiting_loop)
 
         if success:
             # Update object holding state
             feedback.set_robot_holding_state(False, command.object_id.upper())
+            if verifier:
+                receipt = verifier.verify(verification)
+                feedback.print("INFO", f"Placement observation verification: {receipt}")
 
         feedback.print("INFO", "Finished `place` command")
         return success

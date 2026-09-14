@@ -656,6 +656,26 @@ class SpotExecutorRos(Node):
             self.live_approval = LiveApproval(self, self.feedback_collector)
             self.feedback_collector.bounding_box_detection_feedback = self.live_approval.pick
             self.feedback_collector.placement_feedback = self.live_approval.place
+        verification_url = self.declare_parameter("placement_verification_url", "").value
+        if verification_url:
+            import json
+            from urllib.request import Request, urlopen
+            from spot_skills.placement_verification import PlacementVerifier
+            episode = self.declare_parameter("placement_verification_episode", "").value
+            stream = self.declare_parameter("placement_verification_stream", "").value
+            if not episode or not stream:
+                raise ValueError("Placement verification requires episode and calibrated live stream")
+            def search_placement(body):
+                request = Request(verification_url, data=json.dumps(body).encode(),
+                                  headers={"Content-Type": "application/json"})
+                with urlopen(request, timeout=45) as response:
+                    payload = response.read(32*1024*1024+1)
+                    if len(payload)>32*1024*1024:
+                        raise RuntimeError("Placement evidence response exceeds memory limit")
+                    return json.loads(payload)
+            self.feedback_collector.placement_verifier = PlacementVerifier(
+                self.spot_interface, search_placement, episode, stream,
+                cancelled=lambda: self.feedback_collector.break_out_of_waiting_loop)
         self.live_cancel_sub = self.create_subscription(
             String, "~/live_cancel", self.cancel_live, 10
         )
