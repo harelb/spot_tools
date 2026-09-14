@@ -9,3 +9,10 @@ def test_short_motion_and_in_place_turn_have_time_to_settle():
     assert navigation_timeout([[0,0,np.pi-.01],[0,0,-np.pi+.01]],15)==15
     assert navigation_timeout([[0,0,0],[2,0,0]],15)==30
     with pytest.raises(ValueError):navigation_timeout([[0,0,float('nan')]],15)
+
+
+def test_slow_runtime_budget_preserves_default_and_wrap(monkeypatch):
+    monkeypatch.setenv('SPOT_SKILL_NAVIGATION_TIMEOUT_S','30')
+    assert navigation_timeout([[0,0,0],[0,0,2.2]],15)==30
+    monkeypatch.setenv('SPOT_SKILL_NAVIGATION_TIMEOUT_S','31')
+    with pytest.raises(ValueError):navigation_timeout([[0,0,0]],15)

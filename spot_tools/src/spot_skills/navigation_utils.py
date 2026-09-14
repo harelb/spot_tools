@@ -15,6 +15,7 @@ from bosdyn.client.frame_helpers import (
 )
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from numpy.typing import ArrayLike
+from spot_skills.timeouts import skill_timeout
 
 # Global constants to define spot motion speed
 MAX_LINEAR_VEL = 0.75
@@ -84,7 +85,7 @@ def navigate_to_absolute_pose(
             frame_name=frame_name,
             params=params,
         )
-    end_time = 10.0
+    end_time = skill_timeout(10., 'navigation')
     cmd_id = robot_command_client.robot_command(
         lease=None, command=robot_cmd, end_time_secs=time.time() + end_time
     )
@@ -100,7 +101,7 @@ def navigation_timeout(path, seconds_per_meter):
         raise ValueError('Invalid navigation time budget')
     distance=float(np.linalg.norm(np.diff(path[:,:2],axis=0),axis=1).sum())
     yaw=np.diff(path[:,2]);rotation=float(abs(np.arctan2(np.sin(yaw),np.cos(yaw))).sum())
-    return max(15.,distance*seconds_per_meter+rotation*max(5.,seconds_per_meter/2))
+    return max(skill_timeout(15., 'navigation'),distance*seconds_per_meter+rotation*max(5.,seconds_per_meter/2))
 
 
 def follow_trajectory_continuous(
@@ -189,7 +190,7 @@ def follow_trajectory_continuous(
                 angle=float(waypoints_list[-1,2]) if waypoints_list.shape[1]>=3 else tform_body_in_vision[2],
             )
             command_id=navigate_to_absolute_pose(spot, endpoint, frame_name, stairs=stairs)
-            return wait_for_navigation(spot,command_id,cancelled=cancelled,timeout=max(.1,min(15.,timeout-(time.time()-t0))))
+            return wait_for_navigation(spot,command_id,cancelled=cancelled,timeout=max(.1,min(skill_timeout(15., 'navigation'),timeout-(time.time()-t0))))
 
         # 1. project to current path distance
         current_point = shapely.Point(tform_body_in_vision[0], tform_body_in_vision[1])
@@ -245,10 +246,10 @@ def turn_to_point(spot, current_position, target_position):
     return navigate_to_absolute_pose(spot, waypoint, "vision", stairs=False)
 
 
-def wait_for_navigation(spot, command_id, cancelled=lambda:False, timeout=15.):
+def wait_for_navigation(spot, command_id, cancelled=lambda:False, timeout=None):
     """Wait for actual base arrival before an arm operation begins."""
     from bosdyn.api import basic_command_pb2
-    deadline=time.monotonic()+timeout
+    deadline=time.monotonic()+(skill_timeout(15., 'navigation') if timeout is None else timeout)
     try:
         while time.monotonic()<deadline:
             if cancelled():return False
