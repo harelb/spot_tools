@@ -89,7 +89,7 @@ class YOLODetector(Detector):
         # Check if the class exists in the list (lowercase for consistency)
         if prompt_class.lower() not in [cls.lower() for cls in recognized_classes]:
             updated_classes = recognized_classes + [prompt_class.lower()]
-            self.yolo_model.model.set_classes(updated_classes)
+            self.yolo_model.set_classes(updated_classes)
             print(f"Updated recognized classes: {updated_classes}")
 
     def return_centroid(self, img_source, semantic_class, debug):

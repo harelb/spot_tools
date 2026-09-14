@@ -31,13 +31,13 @@ class FakeResult:
 
 
 class FakeYOLOEInnerModel:
-    """Stand-in for `YOLOE(...).model`, whose `.names` and `.set_classes` are
-    used directly by `set_up_detector`."""
+    """Stand-in for `YOLOE(...).model`, whose low-level setter requires embeddings.
+    Class registration must use the public YOLOE wrapper instead."""
 
     def __init__(self, names):
         self.names = names
 
-    def set_classes(self, classes):
+    def set_classes(self, classes, embeddings):
         self.names = list(classes)
 
 
