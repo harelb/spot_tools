@@ -23,7 +23,7 @@ def test_base_wait_requires_at_goal_feedback():
 
 @pytest.mark.parametrize('cancel_in_planner',[False,True])
 def test_cancel_never_sends_another_waypoint(cancel_in_planner):
-    spot=Mock();feedback=SimpleNamespace(break_out_of_waiting_loop=not cancel_in_planner)
+    spot=Mock();spot.get_pose.return_value=[0.,0.,0.];feedback=SimpleNamespace(break_out_of_waiting_loop=not cancel_in_planner)
     planner=Mock()
     def plan(*args):
         feedback.break_out_of_waiting_loop=True
@@ -33,7 +33,7 @@ def test_cancel_never_sends_another_waypoint(cancel_in_planner):
     spot.command_client.robot_command.assert_called_once()
     command=spot.command_client.robot_command.call_args.args[0]
     assert command.full_body_command.HasField('stop_request')
-    spot.get_pose.assert_not_called()
+    assert spot.get_pose.call_count==int(cancel_in_planner)
     assert planner.plan_path.call_count==int(cancel_in_planner)
 
 
@@ -68,3 +68,23 @@ def test_cross_track_translation_preserves_straight_route_heading(monkeypatch,ra
     assert not nav.follow_trajectory_continuous(spot,np.array([[0.,0.,0.],[1.,0.,0.]]),.15,.1,30,planner,feedback=feedback)
     assert sent[0].x>0
     assert sent[0].angle==pytest.approx(0.)
+
+
+def test_rotation_only_does_not_require_zero_length_raster_path(monkeypatch):
+    import spot_skills.navigation_utils as nav
+    spot=Mock();spot.get_pose.return_value=[1.,2.,0.]
+    feedback=Mock(break_out_of_waiting_loop=False);planner=Mock()
+    monkeypatch.setattr(nav,'navigate_to_absolute_pose',lambda *a,**k:17)
+    waiter=Mock(return_value=True);monkeypatch.setattr(nav,'wait_for_navigation',waiter)
+    assert nav.follow_trajectory_continuous(spot,np.array([[1.,2.,0.],[1.,2.,1.2]]),.5,.1,30,planner,feedback=feedback)
+    planner.plan_path.assert_not_called()
+    waiter.assert_called_once()
+
+
+def test_expired_rotation_never_dispatches(monkeypatch):
+    import spot_skills.navigation_utils as nav
+    spot=Mock();feedback=Mock(break_out_of_waiting_loop=False);planner=Mock()
+    clock=iter([0.,31.]);monkeypatch.setattr(nav.time,'time',lambda:next(clock))
+    assert not nav.follow_trajectory_continuous(spot,np.array([[1.,2.,0.],[1.,2.,1.2]]),.5,.1,30,planner,feedback=feedback)
+    spot.get_pose.assert_not_called();planner.plan_path.assert_not_called()
+    assert spot.command_client.robot_command.call_args.args[0].full_body_command.HasField('stop_request')

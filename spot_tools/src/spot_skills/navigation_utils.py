@@ -145,6 +145,24 @@ def follow_trajectory_continuous(
         if cancelled():
             stop()
             return False
+        if time.time() - t0 > timeout:
+            stop()
+            return False
+        tform_body_in_vision = spot.get_pose()
+        distance_from_end = np.linalg.norm(
+            end_pt - np.array([tform_body_in_vision[0], tform_body_in_vision[1]])
+        )
+        if distance_from_end < goal_tolerance:
+            feedback.print("INFO", "Spot reached end of path")
+            endpoint = math_helpers.SE2Pose(
+                x=tform_body_in_vision[0],
+                y=tform_body_in_vision[1],
+                angle=float(waypoints_list[-1,2]) if waypoints_list.shape[1]>=3 else tform_body_in_vision[2],
+            )
+            command_id=navigate_to_absolute_pose(spot, endpoint, frame_name, stairs=stairs)
+            return wait_for_navigation(spot,command_id,cancelled=cancelled,timeout=max(.1,min(skill_timeout(15., 'navigation'),timeout-(time.time()-t0))))
+
+
         # if mid_level_planner is not None:
         # update path every (couple?) loop
         mlp_success, planning_output = mid_level_planner.plan_path(
@@ -178,20 +196,6 @@ def follow_trajectory_continuous(
             # check about making progress
             stop()
             return False
-        tform_body_in_vision = spot.get_pose()
-        distance_from_end = np.linalg.norm(
-            end_pt - np.array([tform_body_in_vision[0], tform_body_in_vision[1]])
-        )
-        if distance_from_end < goal_tolerance:
-            feedback.print("INFO", "Spot reached end of path")
-            endpoint = math_helpers.SE2Pose(
-                x=tform_body_in_vision[0],
-                y=tform_body_in_vision[1],
-                angle=float(waypoints_list[-1,2]) if waypoints_list.shape[1]>=3 else tform_body_in_vision[2],
-            )
-            command_id=navigate_to_absolute_pose(spot, endpoint, frame_name, stairs=stairs)
-            return wait_for_navigation(spot,command_id,cancelled=cancelled,timeout=max(.1,min(skill_timeout(15., 'navigation'),timeout-(time.time()-t0))))
-
         # 1. project to current path distance
         current_point = shapely.Point(tform_body_in_vision[0], tform_body_in_vision[1])
         progress_distance = shapely.line_locate_point(path, current_point)
