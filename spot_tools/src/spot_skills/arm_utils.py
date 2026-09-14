@@ -1,6 +1,7 @@
 """Interface for moving the spot hand."""
 
 import time
+from spot_skills.timeouts import skill_timeout
 
 import numpy as np
 from bosdyn.api import gripper_command_pb2
@@ -45,7 +46,7 @@ def move_hand_to_relative_pose(spot, body_tform_goal: math_helpers.SE3Pose) -> N
     cmd_id = robot_command_client.robot_command(full_cmd)
 
     # Wait until the arm arrives at the goal.
-    if not block_until_arm_arrives(robot_command_client, cmd_id, 2.0):
+    if not block_until_arm_arrives(robot_command_client, cmd_id, skill_timeout(2.0)):
         raise RuntimeError("arm did not reach requested pose")
 
 
@@ -74,7 +75,7 @@ def gaze_at_relative_pose(
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
     # Wait until the arm arrives at the goal.
-    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+    if not block_until_arm_arrives(robot_command_client, cmd_id, skill_timeout(duration)):
         raise RuntimeError("arm command stalled, expired or was cancelled")
     time.sleep(1.0)
 
@@ -91,7 +92,7 @@ def gaze_at_vision_pose(spot, gaze_target, duration=2, stow_after=False):
     # Send the request.
     cmd_id = robot_command_client.robot_command(command=cmd)
     # Wait until the arm arrives at the goal.
-    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+    if not block_until_arm_arrives(robot_command_client, cmd_id, skill_timeout(duration)):
         raise RuntimeError("arm command stalled, expired or was cancelled")
     time.sleep(1.0)
     if stow_after:
@@ -110,7 +111,7 @@ def stow_arm(spot, duration: float = 2.0) -> None:
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
     # Wait until the arm arrives at the goal.
-    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+    if not block_until_arm_arrives(robot_command_client, cmd_id, skill_timeout(duration)):
         raise RuntimeError("arm command stalled, expired or was cancelled")
     return True
 
@@ -126,7 +127,7 @@ def arm_to_carry(spot, duration: float = 2.0) -> None:
     # Send the request.
     cmd_id = robot_command_client.robot_command(cmd)
     # Wait until the arm arrives at the goal.
-    if not block_until_arm_arrives(robot_command_client, cmd_id, duration):
+    if not block_until_arm_arrives(robot_command_client, cmd_id, skill_timeout(duration)):
         raise RuntimeError("arm command stalled, expired or was cancelled")
     return True
 
@@ -160,7 +161,7 @@ def arm_to_drop(spot, duration: float = 2.0) -> None:
     #    ]
     # )
     # arm_cmd_id = spot.command_client.robot_command(arm_joint_move_command)
-    # block_until_arm_arrives(spot.command_client, arm_cmd_id, duration)
+    # block_until_arm_arrives(spot.command_client, arm_cmd_id, skill_timeout(duration))
 
     # Send arm joint command
 
@@ -173,7 +174,7 @@ def arm_to_drop(spot, duration: float = 2.0) -> None:
 #     # Send the request.
 #     cmd_id = robot_command_client.robot_command(cmd)
 #     # Wait until the arm arrives at the goal.
-#     block_until_arm_arrives(robot_command_client, cmd_id, duration)
+#     block_until_arm_arrives(robot_command_client, cmd_id, skill_timeout(duration))
 
 #     # Define the desired pose relative to the body frame
 #     x = 0.3  # Slightly in front of the robot
@@ -195,7 +196,7 @@ def arm_to_drop(spot, duration: float = 2.0) -> None:
 #     )
 #     arm_cmd = arm_command_pb2.ArmCommand(arm_cartesian_command=arm_cartesian_command)
 #     arm_cmd_id = robot_command_client.robot_command(arm_cmd)
-#     block_until_arm_arrives(robot_command_client, arm_cmd_id, duration)
+#     block_until_arm_arrives(robot_command_client, arm_cmd_id, skill_timeout(duration))
 
 #     return True
 

@@ -25,6 +25,7 @@ from bosdyn.client.frame_helpers import (
 )
 from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
 
+from spot_skills.timeouts import skill_timeout
 from spot_skills.arm_utils import (
     close_gripper,
     move_hand_to_relative_pose,
@@ -107,7 +108,7 @@ def force_stow_arm(manipulation_client, state_client, command_client):
 
     robot_cmd = RobotCommandBuilder.arm_stow_command()
     cmd_id = command_client.robot_command(robot_cmd)
-    if not block_until_arm_arrives(command_client, cmd_id, 5.0):
+    if not block_until_arm_arrives(command_client, cmd_id, skill_timeout(5.0)):
         raise RuntimeError("loaded arm failed to stow")
 
 
@@ -133,7 +134,7 @@ def place_at_point(spot, position, cancelled):
             *map(float, target), orientation.w, orientation.x, orientation.y,
             orientation.z, BODY_FRAME_NAME, 2.0)
         command_id = spot.command_client.robot_command(cmd)
-        if not block_until_arm_arrives(spot.command_client, command_id, 5.0):
+        if not block_until_arm_arrives(spot.command_client, command_id, skill_timeout(5.0)):
             raise RuntimeError("arm did not reach approved placement pose")
         if cancelled():
             raise RuntimeError("placement cancelled")
@@ -349,7 +350,7 @@ def object_grasp(
             stop_manipulation()
             return False
         current_time = time.monotonic()
-        if current_time - loop_timer > 15:
+        if current_time - loop_timer > skill_timeout(15., 'grasp'):
             if feedback is not None:
                 feedback.print("INFO", "The pick skill timed out!")
             print("The pick skill timed out!")
@@ -422,7 +423,7 @@ def object_grasp(
     print("Grasp finished, carrying object.")
     carry_cmd = RobotCommandBuilder.arm_carry_command()
     carry_id = spot.command_client.robot_command(carry_cmd)
-    if not block_until_arm_arrives(spot.command_client, carry_id, 5.0):
+    if not block_until_arm_arrives(spot.command_client, carry_id, skill_timeout(5.0)):
         raise RuntimeError("grasped object but failed to reach carry pose")
 
     print("Force stowing arm!")
