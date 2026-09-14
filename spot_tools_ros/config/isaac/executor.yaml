@@ -9,11 +9,11 @@
     body_frame: hamilton/body
     output_dir: /tmp/isaac-spot-executor
     mid_level_planner_type: astar
-    occupancy_inflation_radius: 0.2
+    occupancy_inflation_radius: 0.45
     use_cost_map: true
-    cost_map_safe_distance: 0.5
+    cost_map_safe_distance: 1.0
     cost_map_nearest_obstacle_cost: 5.0
-    follower_lookahead: 0.5
+    follower_lookahead: 0.15
     goal_tolerance: 0.1
     follow_timeout_per_meter: 15.0
     pick_image_source: front_zed_color_image

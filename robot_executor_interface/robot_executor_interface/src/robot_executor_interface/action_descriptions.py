@@ -17,6 +17,16 @@ class Follow:
 
 
 @dataclass
+class Carry:
+    frame: str
+
+
+@dataclass
+class Stow:
+    frame: str
+
+
+@dataclass
 class Gaze:
     frame: str
     robot_point: np.ndarray

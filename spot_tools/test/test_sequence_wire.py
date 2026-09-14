@@ -1,7 +1,7 @@
 import copy
 import numpy as np
 import pytest
-from robot_executor_interface.action_descriptions import ActionSequence, Follow, Gaze, Pick, Place
+from robot_executor_interface.action_descriptions import ActionSequence, Follow, Gaze, Pick, Place, Carry, Stow
 from robot_executor_interface.sequence_wire import encode_sequence, decode_sequence, sequence_digest
 
 
@@ -10,7 +10,8 @@ def sequence():
         Follow('map', np.array([[0.,0.,0.],[1.,2.,.3]])),
         Gaze('map', np.array([1.,2.,0.]), np.array([2.,3.,.7]), 'o1', True),
         Pick('map', 'mug', np.array([1.,2.,0.]), np.array([2.,3.,.7]), 'o1'),
-        Place('map', 'mug', np.array([2.,2.,0.]), np.array([3.,3.,.8]), 'o1')])
+        Place('map', 'mug', np.array([2.,2.,0.]), np.array([3.,3.,.8]), 'o1'),
+        Carry('map'),Stow('map')])
 
 
 def test_lossless_compiled_transport_and_ros_serializer():

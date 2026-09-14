@@ -7,9 +7,9 @@ from dataclasses import asdict
 import hashlib
 import json
 import numpy as np
-from .action_descriptions import ActionSequence, Follow, Gaze, Pick, Place
+from .action_descriptions import ActionSequence, Follow, Gaze, Pick, Place, Carry, Stow
 
-_TYPES = {c.__name__.upper(): c for c in (Follow, Gaze, Pick, Place)}
+_TYPES = {c.__name__.upper(): c for c in (Follow, Gaze, Pick, Place, Carry, Stow)}
 
 
 def _plain(value):

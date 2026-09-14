@@ -12,10 +12,11 @@ from bosdyn.client.robot_command import RobotCommandBuilder
 
 class ManualControl:
     def __init__(self, executor, feedback, *, run_id, episode_id, ready=lambda: True,
-                 clock=time.time, start_watchdog=True):
+                 clock=time.time, monotonic=time.monotonic, start_watchdog=True):
         self.executor, self.feedback = executor, feedback
         self.run_id, self.episode_id = run_id, episode_id
         self.ready, self.clock = ready, clock
+        self.monotonic=monotonic
         self.lock = threading.RLock()
         self.mode = 'planned'
         self.token = None
@@ -76,7 +77,7 @@ class ManualControl:
             if self.executor.processing_action_sequence:
                 raise ValueError('Wait for the active skill to acknowledge stopping')
             self.compute_token = uuid.uuid4().hex
-            self.compute_deadline = self.clock() + 125.
+            self.compute_deadline = self.monotonic() + 125.
             return {'compute_token': self.compute_token}
 
     def release_compute(self, request):
@@ -111,21 +112,21 @@ class ManualControl:
                 self._stop()
                 raise ValueError('Fresh state and collision coverage are required')
             self.sequence = seq
-            self.deadline = issued + .35
+            self.deadline = self.monotonic() + max(0.,.35-(now-issued))
             try:
                 self.executor.spot_interface.set_twist(*velocity)
             except Exception:
                 self._stop()
                 raise
-            return {'accepted':True, 'sequence':seq, 'expires_at':self.deadline}
+            return {'accepted':True, 'sequence':seq, 'expires_at':issued+.35}
 
     def tick(self):
         with self.lock:
-            if self.compute_token and self.clock() >= self.compute_deadline:
+            if self.compute_token and self.monotonic() >= self.compute_deadline:
                 self.compute_token = None
                 self.compute_deadline = 0.
                 self.error = 'Compute reservation expired; motion remains stopped'
-            if self.deadline and self.clock() >= self.deadline:
+            if self.deadline and self.monotonic() >= self.deadline:
                 try:
                     self._stop()
                 except Exception as exc:
@@ -139,7 +140,7 @@ class ManualControl:
         with self.lock:
             return dict(run_id=self.run_id, episode_id=self.episode_id, mode=self.mode,
                         control_token=self.token, sequence=self.sequence, server_time=self.clock(),
-                        error=self.error, driving=self.deadline > self.clock(),
+                        error=self.error, driving=self.deadline > self.monotonic(),
                         compute_active=bool(self.compute_token),
                         skill_active=self.executor.processing_action_sequence)
 

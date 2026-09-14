@@ -13,6 +13,8 @@ from robot_executor_interface.action_descriptions import (
     Gaze,
     Pick,
     Place,
+    Carry,
+    Stow,
 )
 from spot_tools_ros.utils import path_to_waypoints, waypoints_to_path
 
@@ -63,6 +65,10 @@ def from_msg(msg):
                 actions.append(place_from_msg(a))
             case a.GAZE:
                 actions.append(gaze_from_msg(a))
+            case a.CARRY:
+                actions.append(Carry(frame=a.arm_frame))
+            case a.STOW:
+                actions.append(Stow(frame=a.arm_frame))
             case _:
                 raise Exception(f"Received invalid action type {a.action_type}")
     return ActionSequence(
@@ -72,6 +78,21 @@ def from_msg(msg):
 
 def follow_from_msg(msg):
     return Follow(frame=msg.path.header.frame_id, path2d=path_to_waypoints(msg.path))
+
+
+@to_msg.register(Carry)
+@to_msg.register(Stow)
+def posture_to_msg(action):
+    msg=ActionMsg()
+    msg.action_type=type(action).__name__.upper()
+    msg.arm_frame=action.frame
+    return msg
+
+
+@to_viz_msg.register(Carry)
+@to_viz_msg.register(Stow)
+def posture_to_viz(action,marker_ns):
+    return []
 
 
 @to_msg.register

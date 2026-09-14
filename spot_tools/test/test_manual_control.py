@@ -8,7 +8,7 @@ def setup():
     now=[10.]
     spot=Mock()
     ex=SimpleNamespace(spot_interface=spot,processing_action_sequence=False,keep_going=True)
-    control=ManualControl(ex,SimpleNamespace(break_out_of_waiting_loop=False),run_id='r',episode_id='e',clock=lambda:now[0],start_watchdog=False)
+    control=ManualControl(ex,SimpleNamespace(break_out_of_waiting_loop=False),run_id='r',episode_id='e',clock=lambda:now[0],monotonic=lambda:now[0],start_watchdog=False)
     request=dict(run_id='r',episode_id='e',mode='manual')
     state=control.claim(request)
     request.update(control_token=state['control_token'],sequence=1,issued_at=10.,vx=.1,vy=0.,wz=0.)
@@ -22,6 +22,15 @@ def test_deadman_stops_and_requires_new_claim():
     assert c.token is None
     assert spot.command_client.robot_command.call_count==2
     with pytest.raises(ValueError,match='Acquire'):c.drive(dict(r,sequence=2,issued_at=10.36))
+
+
+def test_wall_clock_adjustment_cannot_extend_driving():
+    c,r,spot,now=setup()
+    c.clock=lambda:10.
+    c.drive(r)
+    c.clock=lambda:-100.
+    now[0]=10.36;c.tick()
+    assert c.token is None and not c.state()['driving']
 
 
 def test_reordered_stale_or_wrong_episode_cannot_move():

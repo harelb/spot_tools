@@ -173,10 +173,10 @@ def follow_trajectory_continuous(
             endpoint = math_helpers.SE2Pose(
                 x=tform_body_in_vision[0],
                 y=tform_body_in_vision[1],
-                angle=tform_body_in_vision[2],
+                angle=float(waypoints_list[-1,2]) if waypoints_list.shape[1]>=3 else tform_body_in_vision[2],
             )
-            navigate_to_absolute_pose(spot, endpoint, frame_name, stairs=stairs)
-            break
+            command_id=navigate_to_absolute_pose(spot, endpoint, frame_name, stairs=stairs)
+            return wait_for_navigation(spot,command_id,cancelled=cancelled,timeout=max(.1,min(15.,timeout-(time.time()-t0))))
 
         # 1. project to current path distance
         current_point = shapely.Point(tform_body_in_vision[0], tform_body_in_vision[1])
@@ -221,4 +221,20 @@ def turn_to_point(spot, current_position, target_position):
     waypoint = math_helpers.SE2Pose(
         x=current_position[0], y=current_position[1], angle=angle
     )
-    navigate_to_absolute_pose(spot, waypoint, "vision", stairs=False)
+    return navigate_to_absolute_pose(spot, waypoint, "vision", stairs=False)
+
+
+def wait_for_navigation(spot, command_id, cancelled=lambda:False, timeout=15.):
+    """Wait for actual base arrival before an arm operation begins."""
+    from bosdyn.api import basic_command_pb2
+    deadline=time.monotonic()+timeout
+    try:
+        while time.monotonic()<deadline:
+            if cancelled():return False
+            response=spot.command_client.robot_command_feedback(command_id)
+            result=response.feedback.synchronized_feedback.mobility_command_feedback.se2_trajectory_feedback
+            if result.status==basic_command_pb2.SE2TrajectoryCommand.Feedback.STATUS_AT_GOAL:return True
+            time.sleep(.05)
+        return False
+    finally:
+        spot.command_client.robot_command(RobotCommandBuilder.stop_command())

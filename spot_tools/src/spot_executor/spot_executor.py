@@ -12,14 +12,17 @@ from robot_executor_interface.action_descriptions import (
     Gaze,
     Pick,
     Place,
+    Carry,
+    Stow,
 )
 from scipy.spatial.transform import Rotation
 
-from spot_skills.arm_utils import gaze_at_vision_pose
+from spot_skills.arm_utils import gaze_at_vision_pose,arm_to_carry
 from spot_skills.grasp_utils import object_grasp, object_place, stow_arm
 from spot_skills.navigation_utils import (
     follow_trajectory_continuous,
     turn_to_point,
+    wait_for_navigation,
 )
 
 
@@ -282,6 +285,11 @@ class SpotExecutor:
                     elif type(command) is Place:
                         success = self.execute_place(command, feedback)
 
+                    elif type(command) in (Carry,Stow):
+                        operation=arm_to_carry if type(command) is Carry else stow_arm
+                        success=operation(self.spot_interface,duration=30.)
+                        if feedback.break_out_of_waiting_loop:success=False
+
                     else:
                         raise Exception(
                             f"SpotExecutor received unknown command type {type(command)}"
@@ -328,7 +336,10 @@ class SpotExecutor:
         gaze_point = Rotation.from_quat([rotation.x, rotation.y, rotation.z, rotation.w]).apply(command.gaze_point) + np.asarray(translation)
         feedback.print("INFO", "Executing `gaze` command")
         current_pose = self.spot_interface.get_pose()
-        turn_to_point(self.spot_interface, current_pose, gaze_point)
+        command_id=turn_to_point(self.spot_interface, current_pose, gaze_point)
+        if not wait_for_navigation(self.spot_interface,command_id,
+            cancelled=lambda:feedback.break_out_of_waiting_loop):
+            return False
         # stow_after = command.stow_after
         stow_after = not pick_next
         success = gaze_at_vision_pose(
