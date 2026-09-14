@@ -118,6 +118,7 @@ def follow_trajectory_continuous(
     spot.robot.ensure_client(RobotCommandClient.default_service_name)
 
     end_pt = waypoints_list[-1, :2]
+    reference_path = shapely.LineString(waypoints_list[:, :2])
     t0 = time.time()
     rate = 10
     def cancelled():
@@ -186,9 +187,17 @@ def follow_trajectory_continuous(
         target_distance = progress_distance + lookahead_distance
         target_point = shapely.line_interpolate_point(path, target_distance)
 
-        yaw_angle = np.arctan2(
-            target_point.y - current_point.y, target_point.x - current_point.x
-        )
+        # Spot is holonomic. Cross-track translation must not turn the whole
+        # footprint toward a nearby rounded grid cell in a narrow corridor.
+        # Align with the route tangent while translating back onto the route.
+        # Use the reviewed route for body heading. The local raster planner
+        # changes translation targets at cell boundaries and may add a final
+        # diagonal correction even along a straight reviewed corridor route.
+        heading_distance=shapely.line_locate_point(reference_path,current_point)+lookahead_distance
+        before=shapely.line_interpolate_point(reference_path,max(0.,min(reference_path.length,heading_distance)-.1))
+        after=shapely.line_interpolate_point(reference_path,min(reference_path.length,heading_distance+.1))
+        delta=np.array([after.x-before.x,after.y-before.y])
+        yaw_angle=np.arctan2(delta[1],delta[0]) if np.linalg.norm(delta)>1e-6 else tform_body_in_vision[2]
 
         if feedback is not None:
             # get data back out

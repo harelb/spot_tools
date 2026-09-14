@@ -678,8 +678,13 @@ class SpotExecutorRos(Node):
         self._guard_tick = 0
         heartbeat_timer_group = MutuallyExclusiveCallbackGroup()
         timer_period_s = 0.1
+        # Liveness guards use elapsed wall time, including while simulation
+        # clock advances slowly or is paused. Message stamps remain ROS time.
+        from rclpy.clock import Clock, ClockType
+        self.heartbeat_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self.timer = self.create_timer(
-            timer_period_s, self.hb_callback, callback_group=heartbeat_timer_group
+            timer_period_s, self.hb_callback, callback_group=heartbeat_timer_group,
+            clock=self.heartbeat_clock,
         )
 
         self.manual_server = None

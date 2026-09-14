@@ -50,3 +50,21 @@ def test_final_waypoint_heading_is_executed_and_verified(monkeypatch):
     assert not nav.follow_trajectory_continuous(spot,np.array([[0.,0.,0.],[1.,0.,1.2]]),.5,.1,30,planner,feedback=feedback)
     assert sent[0].angle==1.2
     assert wait.call_args.args==(spot,17)
+
+
+@pytest.mark.parametrize("raster_path", [[[0,0],[1,0]], [[0,0],[.1,0],[.2,.05],[1,.05]]])
+def test_cross_track_translation_preserves_straight_route_heading(monkeypatch,raster_path):
+    import shapely
+    import spot_skills.navigation_utils as nav
+    spot=Mock();spot.get_pose.return_value=[0.,.05,0.]
+    feedback=Mock(break_out_of_waiting_loop=False)
+    output=SimpleNamespace(path_shapely=shapely.LineString(raster_path),path_waypoints_metric=[],target_point_metric=None)
+    planner=Mock();planner.plan_path.return_value=(True,output)
+    sent=[]
+    def navigate(s,pose,*a,**k):
+        sent.append(pose);feedback.break_out_of_waiting_loop=True;return 17
+    monkeypatch.setattr(nav,'navigate_to_absolute_pose',navigate)
+    monkeypatch.setattr(nav.time,'sleep',lambda _:None)
+    assert not nav.follow_trajectory_continuous(spot,np.array([[0.,0.,0.],[1.,0.,0.]]),.15,.1,30,planner,feedback=feedback)
+    assert sent[0].x>0
+    assert sent[0].angle==pytest.approx(0.)
