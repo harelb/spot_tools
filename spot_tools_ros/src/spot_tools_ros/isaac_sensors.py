@@ -10,6 +10,8 @@ import struct
 import time
 import base64
 import hashlib
+from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import urlopen
 from urllib.parse import urlencode
 
@@ -83,6 +85,7 @@ def main():
     parser.add_argument('--robot',default='hamilton')
     parser.add_argument('--source',default='front_zed_color_image',choices=['front_zed_color_image'])
     parser.add_argument('--duration',type=float,default=0)
+    parser.add_argument('--status-file', type=Path)
     parser.add_argument('--occupancy-topic',default='/hamilton/occupancy_grid')
     args=parser.parse_args()
     import os
@@ -142,7 +145,13 @@ def main():
     try:
         while rclpy.ok() and (not args.duration or time.monotonic()-started<args.duration):
             rclpy.spin_once(node,timeout_sec=0)
-            frame=client.next()
+            try:
+                frame=client.next()
+            except HTTPError as exc:
+                if exc.code == 409 and client.transport.call('health').get('paused'):
+                    time.sleep(.1)
+                    continue
+                raise
             if frame is None:
                 time.sleep(.005);continue
             meta,rgb,depth=frame;stamp=stamped(meta['timestamp_ns'])
@@ -172,6 +181,13 @@ def main():
                 msg.position=[j.position.value for j in state.kinematic_state.joint_states]
                 msg.velocity=[j.velocity.value for j in state.kinematic_state.joint_states];joints_pub.publish(msg)
             published+=1
+            if args.status_file and published % 5 == 0:
+                receipt=dict(ready=True, session_id=client.transport.session,
+                    updated_at=time.time(), published=published, elapsed_s=time.monotonic()-started,
+                    last_source_index=client.index, timestamp_ns=client.stamp,
+                    rmw=rclpy.get_rmw_implementation_identifier(), source=args.source)
+                temp=args.status_file.with_suffix('.tmp')
+                temp.write_text(json.dumps(receipt));temp.replace(args.status_file)
             if published%30==0:
                 telemetry.publish(String(data=json.dumps(dict(session_id=client.transport.session,
                     published=published,elapsed_s=time.monotonic()-started,last_source_index=client.index))))
