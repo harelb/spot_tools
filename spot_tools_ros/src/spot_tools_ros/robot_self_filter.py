@@ -40,7 +40,7 @@ def mask_robot_depth(meta,depth,padding=.025):
             x1,y1=np.minimum([w,h],np.ceil(uv.max(axis=0)).astype(int)+2)
         if x1<=x0 or y1<=y0:continue
         z=depth[y0:y1,x0:x1]
-        v,u=np.nonzero(np.isfinite(z)&(z>0))
+        v,u=np.nonzero(np.isfinite(z)&(z>0)&(z>=optical[:,2].min())&(z<=optical[:,2].max()))
         if not len(v):continue
         points=np.column_stack(((u+x0-K[0,2])*z[v,u]/K[0,0],
                                 (v+y0-K[1,2])*z[v,u]/K[1,1],z[v,u]))
