@@ -204,17 +204,20 @@ def follow_trajectory_continuous(
         target_distance = progress_distance + lookahead_distance
         target_point = shapely.line_interpolate_point(path, target_distance)
 
-        # Spot is holonomic. Cross-track translation must not turn the whole
-        # footprint toward a nearby rounded grid cell in a narrow corridor.
-        # Align with the route tangent while translating back onto the route.
-        # Use the reviewed route for body heading. The local raster planner
-        # changes translation targets at cell boundaries and may add a final
-        # diagonal correction even along a straight reviewed corridor route.
+        # Keep the reviewed body's heading while translating sideways/backward.
+        # Raster detours change translation targets, not authored SE(2) headings.
+        # Legacy XY-only routes retain their reference-path tangent heading.
         heading_distance=shapely.line_locate_point(reference_path,current_point)+lookahead_distance
-        before=shapely.line_interpolate_point(reference_path,max(0.,min(reference_path.length,heading_distance)-.1))
-        after=shapely.line_interpolate_point(reference_path,min(reference_path.length,heading_distance+.1))
-        delta=np.array([after.x-before.x,after.y-before.y])
-        yaw_angle=np.arctan2(delta[1],delta[0]) if np.linalg.norm(delta)>1e-6 else tform_body_in_vision[2]
+        if waypoints_list.shape[1]>=3:
+            distances=np.r_[0.,np.linalg.norm(np.diff(waypoints_list[:,:2],axis=0),axis=1).cumsum()]
+            distinct=np.r_[np.diff(distances)>1e-8,True]
+            heading=np.interp(heading_distance,distances[distinct],np.unwrap(waypoints_list[distinct,2]))
+            yaw_angle=np.arctan2(np.sin(heading),np.cos(heading))
+        else:
+            before=shapely.line_interpolate_point(reference_path,max(0.,min(reference_path.length,heading_distance)-.1))
+            after=shapely.line_interpolate_point(reference_path,min(reference_path.length,heading_distance+.1))
+            delta=np.array([after.x-before.x,after.y-before.y])
+            yaw_angle=np.arctan2(delta[1],delta[0]) if np.linalg.norm(delta)>1e-6 else tform_body_in_vision[2]
 
         if feedback is not None:
             # get data back out

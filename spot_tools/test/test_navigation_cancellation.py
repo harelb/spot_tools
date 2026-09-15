@@ -81,6 +81,24 @@ def test_rotation_only_does_not_require_zero_length_raster_path(monkeypatch):
     waiter.assert_called_once()
 
 
+@pytest.mark.parametrize('end',[[0.,1.],[-1.,0.]])
+def test_reviewed_backward_and_lateral_routes_do_not_rotate_body(monkeypatch,end):
+    import shapely
+    import spot_skills.navigation_utils as nav
+    spot=Mock();spot.get_pose.return_value=[0.,0.,-np.pi/2]
+    feedback=Mock(break_out_of_waiting_loop=False)
+    output=SimpleNamespace(path_shapely=shapely.LineString([[0,0],end]),path_waypoints_metric=[],target_point_metric=None)
+    planner=Mock();planner.plan_path.return_value=(True,output);sent=[]
+    def navigate(s,pose,*a,**k):
+        sent.append(pose);feedback.break_out_of_waiting_loop=True;return 17
+    monkeypatch.setattr(nav,'navigate_to_absolute_pose',navigate)
+    monkeypatch.setattr(nav.time,'sleep',lambda _:None)
+    path=np.array([[0.,0.,-np.pi/2],[*end,-np.pi/2]])
+    assert not nav.follow_trajectory_continuous(spot,path,.15,.1,30,planner,feedback=feedback)
+    assert [sent[0].x,sent[0].y]==pytest.approx(np.array(end)*.15)
+    assert sent[0].angle==pytest.approx(-np.pi/2)
+
+
 def test_expired_rotation_never_dispatches(monkeypatch):
     import spot_skills.navigation_utils as nav
     spot=Mock();feedback=Mock(break_out_of_waiting_loop=False);planner=Mock()
