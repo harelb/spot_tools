@@ -773,6 +773,7 @@ class SpotExecutorRos(Node):
         self.holding_state_pub.publish(String(data=json.dumps(dict(
             known=state.HasField('manipulator_state'),is_holding=holding,
             object_id=self.feedback_collector.held_object_id if holding else None,
+            placement_geometry=getattr(self.spot_interface,'placement_geometry',None) if holding else None,
             plan_id=self.feedback_collector.current_plan_id,
             run_id=context.run_id if context else None,
             episode_id=context.episode_id if context else None,

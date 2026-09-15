@@ -63,10 +63,29 @@ class SensorClient:
         self.mask_robot=mask_robot
         self.index=-1
         self.stamp=-1
+        self.stale_since=None
+        self.stale_responses=0
 
     def next(self):
         query=urlencode(dict(session=self.transport.session,source=self.source,after=self.index))
-        with urlopen(self.transport.url+'/rgbd?'+query,timeout=2) as response:
+        try:
+            response=urlopen(self.transport.url+'/rgbd?'+query,timeout=2)
+        except HTTPError as exc:
+            # A render stall is an absence of evidence, never permission to replay
+            # the last frame. Other 409s (wrong episode/source) remain fatal.
+            if exc.code != 409 or exc.reason != 'RGB-D is stale':
+                raise
+            health=self.transport.call('health')  # also checks episode identity
+            if health.get('paused'):
+                self.stale_since=None
+                return None
+            now=time.monotonic()
+            if self.stale_since is None:self.stale_since=now
+            self.stale_responses+=1
+            if now-self.stale_since >= 10:
+                raise RuntimeError('No fresh RGB-D for 10 seconds; sensor recovery expired') from exc
+            return None
+        with response:
             if response.status==204:
                 return None
             length=int(response.headers['Content-Length'])
@@ -77,6 +96,7 @@ class SensorClient:
         if meta['source'] != self.source or meta['frame_index']<=self.index or meta['timestamp_ns']<=self.stamp:
             raise ValueError('stale, reordered or different-source observation')
         self.index,self.stamp=meta['frame_index'],meta['timestamp_ns']
+        self.stale_since=None
         if self.mask_robot:
             from .robot_self_filter import mask_robot_depth
             depth,count=mask_robot_depth(meta,result[2])
@@ -152,15 +172,19 @@ def main():
     try:
         while rclpy.ok() and (not args.duration or time.monotonic()-started<args.duration):
             rclpy.spin_once(node,timeout_sec=0)
-            try:
-                frame=client.next()
-            except HTTPError as exc:
-                if exc.code == 409 and client.transport.call('health').get('paused'):
-                    time.sleep(.1)
-                    continue
-                raise
+            frame=client.next()
             if frame is None:
-                time.sleep(.005);continue
+                if client.stale_since is not None:
+                    if args.status_file:
+                        receipt=dict(ready=False,session_id=client.transport.session,
+                            updated_at=time.time(),published=published,
+                            last_source_index=client.index,timestamp_ns=client.stamp,
+                            error='Waiting for fresh RGB-D',stale_responses=client.stale_responses)
+                        temp=args.status_file.with_suffix('.tmp')
+                        temp.write_text(json.dumps(receipt));temp.replace(args.status_file)
+                    time.sleep(.1)
+                else:time.sleep(.005)
+                continue
             meta,rgb,depth=frame;stamp=stamped(meta['timestamp_ns'])
             for pixels,encoding,pub in [(rgb,'rgb8',color_pub),(depth,'32FC1',depth_pub)]:
                 msg=Image();msg.header.stamp=stamp;msg.header.frame_id=optical
@@ -192,6 +216,7 @@ def main():
                 receipt=dict(ready=True, session_id=client.transport.session,
                     updated_at=time.time(), published=published, elapsed_s=time.monotonic()-started,
                     last_source_index=client.index, timestamp_ns=client.stamp,
+                    stale_responses=client.stale_responses,
                     rmw=rclpy.get_rmw_implementation_identifier(), source=args.source,
                     self_filter=meta.get('mapping_self_filter'))
                 temp=args.status_file.with_suffix('.tmp')

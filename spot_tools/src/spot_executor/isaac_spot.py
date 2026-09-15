@@ -124,6 +124,11 @@ class IsaacSpot(Spot):
     """Real skill branch, with injected SDK clients instead of hardware clients."""
     backend = "isaac"
 
+    def get_observed_payload(self):
+        if 'observed_payload' not in self.transport.capabilities:
+            return None
+        return self.transport.call('observed_payload')
+
     def __init__(self, endpoint="http://127.0.0.1:9250", *, transport=None):
         # Do not call Spot.__init__: it authenticates to physical hardware.
         self.transport = transport if transport is not None else IsaacTransport(endpoint)

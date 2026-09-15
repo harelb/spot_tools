@@ -153,6 +153,7 @@ def place_at_point(spot, position, cancelled):
         raise RuntimeError("placement cancelled before release")
     open_gripper(spot)
     spot.placement_grasp_orientation = None
+    spot.placement_geometry = None
     move(above)
     stow_arm(spot)
     close_gripper(spot)
@@ -436,6 +437,13 @@ def object_grasp(
         spot.placement_grasp_orientation = get_a_tform_b(
             grasp_state.kinematic_state.transforms_snapshot,
             VISION_FRAME_NAME, HAND_FRAME_NAME).rot
+        spot.placement_geometry = None
+        observe=getattr(spot,'get_observed_payload',None)
+        observation=observe() if observe else None
+        if observation is not None:
+            from spot_skills.placement_geometry import placement_clearance
+            spot.placement_geometry=placement_clearance(
+                observation,spot.placement_grasp_orientation.to_matrix())
 
     # Move the arm to a carry position.
     print("Grasp finished, carrying object.")
