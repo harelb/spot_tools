@@ -95,7 +95,7 @@ class ManualControl:
         self._identity(request)
         with self.lock:
             if self.mode != 'manual' or not self.token or request.get('control_token') != self.token:
-                raise ValueError('Acquire manual control before driving')
+                raise ValueError(self.error or 'Acquire manual control before driving')
             if self.executor.processing_action_sequence:
                 raise ValueError('A skill still owns motion')
             seq = request.get('sequence')
@@ -109,13 +109,15 @@ class ManualControl:
             if not all(map(math.isfinite, velocity)) or math.hypot(*velocity[:2]) > .25 or abs(velocity[2]) > .5:
                 raise ValueError('Invalid teleop velocity')
             if not self.ready():
+                self.error = 'Fresh state and collision coverage are required'
                 self._stop()
-                raise ValueError('Fresh state and collision coverage are required')
+                raise ValueError(self.error)
             self.sequence = seq
             self.deadline = self.monotonic() + max(0.,.35-(now-issued))
             try:
                 self.executor.spot_interface.set_twist(*velocity)
-            except Exception:
+            except Exception as exc:
+                self.error = str(exc)
                 self._stop()
                 raise
             return {'accepted':True, 'sequence':seq, 'expires_at':issued+.35}
@@ -127,6 +129,7 @@ class ManualControl:
                 self.compute_deadline = 0.
                 self.error = 'Compute reservation expired; motion remains stopped'
             if self.deadline and self.monotonic() >= self.deadline:
+                self.error = 'Driving stopped because operator input expired; release and press a control again'
                 try:
                     self._stop()
                 except Exception as exc:

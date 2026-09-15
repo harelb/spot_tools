@@ -21,7 +21,9 @@ def test_deadman_stops_and_requires_new_claim():
     now[0]=10.36;c.tick()
     assert c.token is None
     assert spot.command_client.robot_command.call_count==2
-    with pytest.raises(ValueError,match='Acquire'):c.drive(dict(r,sequence=2,issued_at=10.36))
+    assert 'input expired' in c.state()['error']
+    with pytest.raises(ValueError,match='input expired'):c.drive(dict(r,sequence=2,issued_at=10.36))
+    assert c.claim(r)['error'] is None
 
 
 def test_wall_clock_adjustment_cannot_extend_driving():
@@ -58,6 +60,8 @@ def test_unready_or_failed_hardware_never_accepts_drive():
     c,r,spot,now=setup();spot.set_twist.side_effect=RuntimeError('obstructed')
     with pytest.raises(RuntimeError,match='obstructed'):c.drive(r)
     assert c.token is None
+    assert c.state()['error']=='obstructed'
+    with pytest.raises(ValueError,match='obstructed'):c.drive(dict(r,sequence=2))
 
 
 def test_compute_holds_motion_and_never_reuses_old_lease():
