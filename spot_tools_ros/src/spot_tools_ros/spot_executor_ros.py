@@ -661,13 +661,26 @@ class SpotExecutorRos(Node):
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
-        # Optional GraphNav waypoint travel for Follow (graph_nav_enabled). Everything
-        # lives in graph_nav_executor_ros.py so this node stays a shell around SpotExecutor.
-        from spot_tools_ros.graph_nav_executor_ros import maybe_wrap_graph_nav
-
-        self.spot_executor = maybe_wrap_graph_nav(
-            self, self.spot_executor, use_fake_spot=use_fake_spot_interface
-        )
+        # Optional GraphNav waypoint travel for Follow (graph_nav_enabled). The
+        # GraphNav extension is not present in every spot_tools checkout, so keep
+        # the ordinary executor usable when the optional module is absent.
+        try:
+            from spot_tools_ros.graph_nav_executor_ros import maybe_wrap_graph_nav
+        except ModuleNotFoundError as exc:
+            if exc.name != "spot_tools_ros.graph_nav_executor_ros":
+                raise
+            self.declare_parameter("graph_nav_enabled", False)
+            if self.get_parameter("graph_nav_enabled").value:
+                raise RuntimeError(
+                    "graph_nav_enabled requires spot_tools_ros.graph_nav_executor_ros"
+                ) from exc
+            self.get_logger().warn(
+                "GraphNav extension is unavailable; using the ordinary executor"
+            )
+        else:
+            self.spot_executor = maybe_wrap_graph_nav(
+                self, self.spot_executor, use_fake_spot=use_fake_spot_interface
+            )
 
         # One JSON String per finished (or aborted) sequence: {plan_id, success, actions,
         # preempted, error}. Planners that dispatch over ROS wait on this to know when

@@ -149,15 +149,17 @@ class FakePathPublisher(Node):
             self.publisher.publish(msg)
             self.viz_publisher.publish(to_viz_msg(action_sequence, self.robot_name))
             self.get_logger().info(f"Published path with {len(waypoints)} waypoints")
+            return True
 
         except Exception as e:
             self.get_logger().error(f"Failed to publish path: {e}")
+            return False
 
     def publish_once(self):
-        """Publish path once and shutdown"""
-        self.publish_path()
-        self.timer.cancel()
-        raise KeyboardInterrupt  # To exit the spin loop
+        """Publish once TF discovery is ready, then shut down."""
+        if self.publish_path():
+            self.timer.cancel()
+            raise KeyboardInterrupt  # To exit the spin loop
 
 
 def main():

@@ -12,6 +12,7 @@ The harness watches TF and asserts the robot reaches the goal through free space
 
 import os
 import pathlib
+import signal
 import subprocess
 import sys
 import time
@@ -73,7 +74,13 @@ class Stack:
     def spawn(self, name, cmd):
         log = open(self.workdir / f"{name}.log", "w")
         self.procs[name] = (
-            subprocess.Popen(cmd, env=self.env, stdout=log, stderr=subprocess.STDOUT),
+            subprocess.Popen(
+                cmd,
+                env=self.env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            ),
             log,
         )
 
@@ -195,13 +202,19 @@ class Stack:
 
     def stop(self):
         for name, (p, log) in self.procs.items():
-            if p.poll() is None:
-                p.terminate()
+            try:
+                os.killpg(p.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         for name, (p, log) in self.procs.items():
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                p.kill()
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                p.wait(timeout=5)
             log.close()
 
     def log(self, name):
