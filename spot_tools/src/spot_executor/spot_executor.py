@@ -336,9 +336,17 @@ class SpotExecutor:
         gaze_point = Rotation.from_quat([rotation.x, rotation.y, rotation.z, rotation.w]).apply(command.gaze_point) + np.asarray(translation)
         feedback.print("INFO", "Executing `gaze` command")
         current_pose = self.spot_interface.get_pose()
-        command_id=turn_to_point(self.spot_interface, current_pose, gaze_point)
-        if not wait_for_navigation(self.spot_interface,command_id,
-            cancelled=lambda:feedback.break_out_of_waiting_loop):
+        if feedback.break_out_of_waiting_loop:
+            return False
+        # Pickup navigation already selected the body stance and heading.
+        # Gaze prepares the hand view without adding an unplanned body sweep
+        # into the object's support. Standalone inspection keeps its body turn.
+        if not pick_next:
+            command_id=turn_to_point(self.spot_interface, current_pose, gaze_point)
+            if not wait_for_navigation(self.spot_interface,command_id,
+                cancelled=lambda:feedback.break_out_of_waiting_loop):
+                return False
+        if feedback.break_out_of_waiting_loop:
             return False
         # stow_after = command.stow_after
         stow_after = not pick_next
