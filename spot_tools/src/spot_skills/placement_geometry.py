@@ -19,4 +19,7 @@ def placement_clearance(observation, world_R_hand):
     offset=max(0.,float(extent[2]-center[2]))
     return dict(minimum_hand_clearance_m=offset,
                 recommended_hand_clearance_m=offset+.03,
+                footprint_frame='vision',
+                footprint_min_xy_m=(center-extent)[:2].tolist(),
+                footprint_max_xy_m=(center+extent)[:2].tolist(),
                 source='Observed held envelope at the preserved grasp attitude')

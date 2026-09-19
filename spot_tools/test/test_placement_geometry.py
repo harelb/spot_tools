@@ -8,6 +8,9 @@ def test_observed_payload_below_hand_increases_release_clearance():
     result=placement_clearance(dict(box=[.2,.16,.14],hand_T_box=transform),np.eye(3))
     assert result['minimum_hand_clearance_m']==pytest.approx(.2)
     assert result['recommended_hand_clearance_m']==pytest.approx(.23)
+    assert result['footprint_frame']=='vision'
+    assert result['footprint_min_xy_m']==pytest.approx([-.05,-.08])
+    assert result['footprint_max_xy_m']==pytest.approx([.15,.08])
 
 
 def test_clearance_uses_preserved_world_attitude_and_full_box_extent():
@@ -15,6 +18,8 @@ def test_clearance_uses_preserved_world_attitude_and_full_box_extent():
     rotation=np.array([[0,0,1],[0,1,0],[-1,0,0]])
     result=placement_clearance(dict(box=[.16,.1,.1],hand_T_box=transform),rotation)
     assert result['minimum_hand_clearance_m']==pytest.approx(.2)
+    assert result['footprint_min_xy_m']==pytest.approx([-.05,-.05])
+    assert result['footprint_max_xy_m']==pytest.approx([.05,.05])
     with pytest.raises(ValueError):
         placement_clearance(dict(box=[2,.1,.1],hand_T_box=transform),rotation)
     with pytest.raises(ValueError):
