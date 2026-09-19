@@ -286,9 +286,12 @@ class SpotExecutor:
                         success = self.execute_place(command, feedback)
 
                     elif type(command) in (Carry,Stow):
+                        skill_name=type(command).__name__.lower()
+                        feedback.print("INFO", f"Executing `{skill_name}` command")
                         operation=arm_to_carry if type(command) is Carry else stow_arm
                         success=operation(self.spot_interface,duration=30.)
                         if feedback.break_out_of_waiting_loop:success=False
+                        feedback.print("INFO", f"Finished `{skill_name}` command with return {success}")
 
                     else:
                         raise Exception(
@@ -354,7 +357,7 @@ class SpotExecutor:
             self.spot_interface, gaze_point, stow_after=stow_after
         )
         feedback.gaze_feedback(current_pose, command.gaze_point)
-        feedback.print("INFO", "Finished `gaze` command")
+        feedback.print("INFO", f"Finished `gaze` command with return {success}")
         return success
 
     def execute_pick(self, command, feedback):
@@ -392,7 +395,7 @@ class SpotExecutor:
             # Update object holding state
             feedback.set_robot_holding_state(True, command.object_id.upper())
 
-        feedback.print("INFO", "Finished `pick` command")
+        feedback.print("INFO", f"Finished `pick` command with return {success}")
         feedback.print("INFO", f"Pick skill success: {success}")
         return success
 
@@ -412,7 +415,7 @@ class SpotExecutor:
                 receipt = verifier.verify(verification)
                 feedback.print("INFO", f"Placement observation verification: {receipt}")
 
-        feedback.print("INFO", "Finished `place` command")
+        feedback.print("INFO", f"Finished `place` command with return {success}")
         return success
 
     def execute_follow(self, command, feedback):
