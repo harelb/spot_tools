@@ -85,7 +85,9 @@ def navigate_to_absolute_pose(
             frame_name=frame_name,
             params=params,
         )
-    end_time = skill_timeout(10., 'navigation')
+    # The overall follower may wait longer in a slow deployment, but an
+    # individual command must retain the existing bounded SDK lifetime.
+    end_time = min(30., skill_timeout(10., 'navigation'))
     cmd_id = robot_command_client.robot_command(
         lease=None, command=robot_cmd, end_time_secs=time.time() + end_time
     )
