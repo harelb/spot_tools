@@ -322,6 +322,20 @@ class MidLevelPlanner:
             ]
             a_star_path_metric = np.array(a_star_path_metric).reshape(-1, 4)
             a_star_path_metric = a_star_path_metric[:, :2]
+            # Raster conversion loses the sub-cell part of the reviewed goal.
+            # Restore it only when A* actually reaches that observed free cell;
+            # never extend a projected obstacle/frontier goal into unknown space.
+            final_cell = tuple(high_level_path_grid[-1])
+            if (target_distance_shapely >= high_level_path_shapely.length
+                    and tuple(target_point_grid_proj) == final_cell
+                    and tuple(a_star_path_grid[-1]) == final_cell
+                    and self.is_free(final_cell)):
+                exact_goal = np.asarray(high_level_path_metric[-1, :2], dtype=float)
+                a_star_path_metric = np.vstack((a_star_path_metric, exact_goal))
+                output.target_point_metric = np.array([*exact_goal, 0, 1]).reshape(4, 1)
+            if len(a_star_path_metric) == 1:
+                # A stationary raster path is still a valid LineString input.
+                a_star_path_metric = np.repeat(a_star_path_metric, 2, axis=0)
             a_star_path_execute = a_star_path_metric
             output.path_shapely = shapely.LineString(a_star_path_execute)
             output.path_waypoints_metric = a_star_path_metric
