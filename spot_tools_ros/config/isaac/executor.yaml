@@ -14,7 +14,9 @@
     cost_map_safe_distance: 1.0
     cost_map_nearest_obstacle_cost: 5.0
     follower_lookahead: 0.15
-    goal_tolerance: 0.1
+    # Finish the reviewed approach closely enough for image-based arm reach.
+    # The Isaac SDK settles absolute goals to 5 mm; physical profiles are separate.
+    goal_tolerance: 0.008
     follow_timeout_per_meter: 15.0
     pick_image_source: front_zed_color_image
     enable_live_approval: true
