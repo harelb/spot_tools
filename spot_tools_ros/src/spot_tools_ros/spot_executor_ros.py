@@ -73,6 +73,29 @@ def pt_to_marker(pt, ns, mid, color, fid="vision"):
     return m
 
 
+def parse_robot_color(value):
+    """``robot_color`` param -> (r, g, b) floats, or None for the default colors.
+
+    Accepts "#rrggbb", "rrggbb" or a "prefix:#rrggbb" form (the generated params
+    use "color:#rrggbb" so the substituted hex is not read as a YAML comment).
+    Anything else ("", "none", "color:none", garbage) means defaults.
+    """
+    h = str(value or "").rpartition(":")[2].strip().lstrip("#")
+    if len(h) != 6:
+        return None
+    try:
+        return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
+def shade(rgb, k):
+    """Scale an (r, g, b) color toward black (k < 1) or white (k > 1)."""
+    if k <= 1.0:
+        return [c * k for c in rgb]
+    return [c + (1.0 - c) * (k - 1.0) for c in rgb]
+
+
 def build_markers(pts, namespaces, frames, colors):
     ma = MarkerArray()
     for i, pt in enumerate(pts):
@@ -82,7 +105,7 @@ def build_markers(pts, namespaces, frames, colors):
 
 
 class RosFeedbackCollector:
-    def __init__(self, odom_frame: str, output_dir: str):
+    def __init__(self, odom_frame: str, output_dir: str, robot_color=None):
         self.pick_confirmation_event = threading.Event()
         # self.pick_confirmation_response = False
 
@@ -102,6 +125,14 @@ class RosFeedbackCollector:
         self.current_robot_name = ""
 
         self.output_dir = output_dir
+
+        # Path-following markers: progress point / lookahead target. With a robot
+        # color the target is a darker shade of it, so several robots stay apart.
+        if robot_color is None:
+            self.progress_color, self.target_color = [0, 1, 1], [1, 0, 1]
+        else:
+            self.progress_color = list(robot_color)
+            self.target_color = shade(robot_color, 0.55)
 
     def bounding_box_detection_feedback(
         self, detection_imgs, detection_index, centroid_x, centroid_y, semantic_class
@@ -158,7 +189,7 @@ class RosFeedbackCollector:
     def path_following_progress_feedback(self, progress_point, target_point):
         pts = [progress_point, target_point]
         namespaces = ["path_progress"] * 2
-        colors = [[0, 1, 1], [1, 0, 1]]
+        colors = [self.progress_color, self.target_color]
         frames = [self.odom_frame] * 2
         self.progress_point_pub.publish(build_markers(pts, namespaces, frames, colors))
 
@@ -168,7 +199,7 @@ class RosFeedbackCollector:
 
         pts = [target_point_metric_flattened]
         namespaces = ["projected target point"]
-        colors = [[1, 0, 1]]
+        colors = [self.target_color]
         frames = [self.odom_frame]
         self.mlp_target_publisher.publish(
             build_markers(pts, namespaces, frames, colors)
@@ -407,7 +438,13 @@ class SpotExecutorRos(Node):
         output_dir = self.get_parameter("output_dir").value
         assert output_dir != ""
 
-        self.feedback_collector = RosFeedbackCollector(self.odom_frame, output_dir)
+        # "#rrggbb" (or "color:#rrggbb") from topology.yaml; empty/"none" = defaults.
+        self.declare_parameter("robot_color", "")
+        robot_color = parse_robot_color(self.get_parameter("robot_color").value)
+
+        self.feedback_collector = RosFeedbackCollector(
+            self.odom_frame, output_dir, robot_color=robot_color
+        )
         self.feedback_collector.register_publishers(self)
 
         self.tf_buffer = tf2_ros.Buffer()

@@ -5,6 +5,7 @@ import numpy as np
 import rclpy.time
 from geometry_msgs.msg import Point
 from robot_executor_msgs.msg import ActionMsg, ActionSequenceMsg
+from std_msgs.msg import ColorRGBA
 from visualization_msgs.msg import Marker, MarkerArray
 
 from robot_executor_interface.action_descriptions import (
@@ -28,8 +29,91 @@ def to_msg(action):
 
 
 @singledispatch
-def to_viz_msg(action, marker_ns):
+def to_viz_msg(action, marker_ns, color=None):
+    """Markers for ``action``.
+
+    ``color`` (rgb/rgba floats in [0, 1], "#rrggbb", or a std_msgs ColorRGBA) tints
+    every marker with the robot's color and adds a text label naming the action
+    kind; ``None`` keeps the fixed per-action-type colors.
+    """
     raise Exception(f"Unknown action type {type(action)}")
+
+
+def to_color_rgba(color, alpha=None):
+    """Normalize a robot color to ColorRGBA (None stays None).
+
+    ``alpha`` overrides the input's alpha (spheres are drawn half transparent).
+    """
+    if color is None:
+        return None
+    if isinstance(color, ColorRGBA):
+        rgba = (color.r, color.g, color.b, color.a)
+    elif isinstance(color, str):
+        h = color.strip().lstrip("#")
+        if len(h) != 6:
+            raise ValueError(f"not a #rrggbb color: {color!r}")
+        rgba = tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4)) + (1.0,)
+    else:
+        rgba = tuple(float(c) for c in color)
+        if len(rgba) == 3:
+            rgba += (1.0,)
+        if len(rgba) != 4:
+            raise ValueError(f"expected an rgb or rgba tuple, got {color!r}")
+    if alpha is not None:
+        rgba = rgba[:3] + (float(alpha),)
+    return ColorRGBA(r=rgba[0], g=rgba[1], b=rgba[2], a=rgba[3])
+
+
+def _label_marker(frame, marker_ns, marker_id, text, position, color):
+    """View-facing text above ``position`` so the action kind survives recoloring."""
+    m = Marker()
+    m.header.frame_id = frame
+    m.header.stamp = gtm()
+    m.ns = marker_ns
+    m.id = marker_id
+    m.type = m.TEXT_VIEW_FACING
+    m.action = m.ADD
+    m.pose.orientation.w = 1.0
+    m.pose.position.x = float(position[0])
+    m.pose.position.y = float(position[1])
+    m.pose.position.z = float(position[2]) + 0.5
+    m.scale.z = 0.4  # text height
+    m.color = to_color_rgba(color, alpha=1.0)
+    m.text = text
+    return m
+
+
+def _arrow_markers(action, marker_ns, color, target_point, default_rgb, label):
+    """Robot point -> target arrow shared by Gaze/Pick/Place (plus label if colored)."""
+    pt1 = Point()
+    pt1.x = action.robot_point[0]
+    pt1.y = action.robot_point[1]
+    pt1.z = action.robot_point[2]
+    pt2 = Point()
+    pt2.x = target_point[0]
+    pt2.y = target_point[1]
+    pt2.z = target_point[2]
+
+    m = Marker()
+    m.header.frame_id = action.frame
+    m.header.stamp = gtm()
+    m.ns = marker_ns
+    m.id = 0
+    m.type = m.ARROW
+    m.action = m.ADD
+    m.pose.orientation.w = 1.0
+    m.scale.x = 0.1  # shaft diameter
+    m.scale.y = 0.2  # head diameter
+    if color is None:
+        m.color.a = 1.0
+        m.color.r, m.color.g, m.color.b = default_rgb
+    else:
+        m.color = to_color_rgba(color, alpha=1.0)
+    m.points = [pt1, pt2]
+
+    if color is None:
+        return [m]
+    return [m, _label_marker(action.frame, marker_ns, 1, label, target_point, color)]
 
 
 @to_msg.register
@@ -45,10 +129,10 @@ def _(action: ActionSequence):
 
 
 @to_viz_msg.register
-def _(action: ActionSequence, marker_ns):
+def _(action: ActionSequence, marker_ns, color=None):
     ma = MarkerArray()
     for ix, a in enumerate(action.actions):
-        ma.markers += to_viz_msg(a, marker_ns + f"/{ix}")
+        ma.markers += to_viz_msg(a, marker_ns + f"/{ix}", color=color)
     return ma
 
 
@@ -84,7 +168,7 @@ def _(action: Follow):
 
 
 @to_viz_msg.register
-def _(action: Follow, marker_ns):
+def _(action: Follow, marker_ns, color=None):
     points = []
     for p in action.path2d:
         pt = Point()
@@ -106,6 +190,8 @@ def _(action: Follow, marker_ns):
     m.color.r = 0.0
     m.color.g = 1.0
     m.color.b = 0.0
+    if color is not None:
+        m.color = to_color_rgba(color, alpha=1.0)
     m.points = points
 
     start = Marker()
@@ -123,6 +209,8 @@ def _(action: Follow, marker_ns):
     start.color.r = 1.0
     start.color.g = 0.0
     start.color.b = 0.0
+    if color is not None:
+        start.color = to_color_rgba(color, alpha=0.5)
     start.pose.position.x = points[0].x
     start.pose.position.y = points[0].y
     start.pose.position.z = points[0].z
@@ -142,6 +230,8 @@ def _(action: Follow, marker_ns):
     end.color.r = 0.0
     end.color.g = 0.0
     end.color.b = 1.0
+    if color is not None:
+        end.color = to_color_rgba(color, alpha=0.5)
     end.pose.position.x = points[-1].x
     end.pose.position.y = points[-1].y
     end.pose.position.z = points[-1].z
@@ -185,33 +275,10 @@ def _(action: Gaze):
 
 
 @to_viz_msg.register
-def _(action: Gaze, marker_ns):
-    pt1 = Point()
-    pt1.x = action.robot_point[0]
-    pt1.y = action.robot_point[1]
-    pt1.z = action.robot_point[2]
-    pt2 = Point()
-    pt2.x = action.gaze_point[0]
-    pt2.y = action.gaze_point[1]
-    pt2.z = action.gaze_point[2]
-
-    m = Marker()
-    m.header.frame_id = action.frame
-    m.header.stamp = gtm()
-    m.ns = marker_ns
-    m.id = 0
-    m.type = m.ARROW
-    m.action = m.ADD
-    m.pose.orientation.w = 1.0
-    m.scale.x = 0.1  # shaft diameter
-    m.scale.y = 0.2  # head diameter
-    m.color.a = 1.0
-    m.color.r = 1.0
-    m.color.g = 0.0
-    m.color.b = 0.0
-    m.points = [pt1, pt2]
-
-    return [m]
+def _(action: Gaze, marker_ns, color=None):
+    return _arrow_markers(
+        action, marker_ns, color, action.gaze_point, (1.0, 0.0, 0.0), "gaze"
+    )
 
 
 def pick_from_msg(msg):
@@ -249,33 +316,10 @@ def _(action: Pick):
 
 
 @to_viz_msg.register
-def _(action: Pick, marker_ns):
-    pt1 = Point()
-    pt1.x = action.robot_point[0]
-    pt1.y = action.robot_point[1]
-    pt1.z = action.robot_point[2]
-    pt2 = Point()
-    pt2.x = action.object_point[0]
-    pt2.y = action.object_point[1]
-    pt2.z = action.object_point[2]
-
-    m = Marker()
-    m.header.frame_id = action.frame
-    m.header.stamp = gtm()
-    m.ns = marker_ns
-    m.id = 0
-    m.type = m.ARROW
-    m.action = m.ADD
-    m.pose.orientation.w = 1.0
-    m.scale.x = 0.1  # shaft diameter
-    m.scale.y = 0.2  # head diameter
-    m.color.a = 1.0
-    m.color.r = 0.0
-    m.color.g = 1.0
-    m.color.b = 0.0
-    m.points = [pt1, pt2]
-
-    return [m]
+def _(action: Pick, marker_ns, color=None):
+    return _arrow_markers(
+        action, marker_ns, color, action.object_point, (0.0, 1.0, 0.0), "pick"
+    )
 
 
 def place_from_msg(msg):
@@ -312,30 +356,7 @@ def _(action: Place):
 
 
 @to_viz_msg.register
-def _(action: Place, marker_ns):
-    pt1 = Point()
-    pt1.x = action.robot_point[0]
-    pt1.y = action.robot_point[1]
-    pt1.z = action.robot_point[2]
-    pt2 = Point()
-    pt2.x = action.object_point[0]
-    pt2.y = action.object_point[1]
-    pt2.z = action.object_point[2]
-
-    m = Marker()
-    m.header.frame_id = action.frame
-    m.header.stamp = gtm()
-    m.ns = marker_ns
-    m.id = 0
-    m.type = m.ARROW
-    m.action = m.ADD
-    m.pose.orientation.w = 1.0
-    m.scale.x = 0.1  # shaft diameter
-    m.scale.y = 0.2  # head diameter
-    m.color.a = 1.0
-    m.color.r = 0.0
-    m.color.g = 0.0
-    m.color.b = 1.0
-    m.points = [pt1, pt2]
-
-    return [m]
+def _(action: Place, marker_ns, color=None):
+    return _arrow_markers(
+        action, marker_ns, color, action.object_point, (0.0, 0.0, 1.0), "place"
+    )
