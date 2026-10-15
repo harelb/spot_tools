@@ -75,6 +75,29 @@ def pt_to_marker(pt, ns, mid, color, fid="vision"):
     return m
 
 
+def parse_robot_color(value):
+    """``robot_color`` param -> (r, g, b) floats, or None for the default colors.
+
+    Accepts "#rrggbb", "rrggbb" or a "prefix:#rrggbb" form (the generated params
+    use "color:#rrggbb" so the substituted hex is not read as a YAML comment).
+    Anything else ("", "none", "color:none", garbage) means defaults.
+    """
+    h = str(value or "").rpartition(":")[2].strip().lstrip("#")
+    if len(h) != 6:
+        return None
+    try:
+        return tuple(int(h[i : i + 2], 16) / 255.0 for i in (0, 2, 4))
+    except ValueError:
+        return None
+
+
+def shade(rgb, k):
+    """Scale an (r, g, b) color toward black (k < 1) or white (k > 1)."""
+    if k <= 1.0:
+        return [c * k for c in rgb]
+    return [c + (1.0 - c) * (k - 1.0) for c in rgb]
+
+
 def build_markers(pts, namespaces, frames, colors):
     ma = MarkerArray()
     for i, pt in enumerate(pts):
@@ -84,7 +107,13 @@ def build_markers(pts, namespaces, frames, colors):
 
 
 class RosFeedbackCollector:
-    def __init__(self, odom_frame: str, output_dir: str, log_to_file_level):
+    def __init__(
+        self,
+        odom_frame: str,
+        output_dir: str,
+        log_to_file_level: str = "",
+        robot_color=None,
+    ):
         self.pick_confirmation_event = threading.Event()
         # self.pick_confirmation_response = False
 
@@ -133,6 +162,16 @@ class RosFeedbackCollector:
 
             # Add the handler to the logger
             self.file_logger.addHandler(file_handler)
+
+        # Path-following markers: progress point / lookahead target. With a robot
+        # color the target is a darker shade of it, so several robots stay apart.
+        if robot_color is None:
+            self.progress_color, self.target_color = [0, 1, 1], [1, 0, 1]
+            self.subgoal_color = [0, 0, 1]
+        else:
+            self.progress_color = list(robot_color)
+            self.target_color = shade(robot_color, 0.55)
+            self.subgoal_color = shade(robot_color, 0.3)
 
     # object_grasp passes depth registered to each candidate camera when set.
     supports_depth = True
@@ -261,7 +300,7 @@ class RosFeedbackCollector:
     def path_following_progress_feedback(self, progress_point, target_point):
         pts = [progress_point, target_point]
         namespaces = ["path_progress"] * 2
-        colors = [[0, 1, 1], [1, 0, 1]]
+        colors = [self.progress_color, self.target_color]
         frames = [self.odom_frame] * 2
         self.progress_point_pub.publish(build_markers(pts, namespaces, frames, colors))
 
@@ -295,7 +334,7 @@ class RosFeedbackCollector:
             "actual target point",
             "subgoal target point",
         ]
-        colors = [[1, 0, 1], [0, 1, 1], [0, 0, 1]]
+        colors = [self.target_color, self.progress_color, self.subgoal_color]
         frames = [self.odom_frame] * 3
         self.mlp_target_publisher.publish(
             build_markers(pts, namespaces, frames, colors)
@@ -595,12 +634,16 @@ class SpotExecutorRos(Node):
         output_dir = self.get_parameter("output_dir").value
         assert output_dir != ""
 
+        # "#rrggbb" (or "color:#rrggbb") from topology.yaml; empty/"none" = defaults.
+        self.declare_parameter("robot_color", "")
+        robot_color = parse_robot_color(self.get_parameter("robot_color").value)
+
         # TODO(multy): quick way to log everything feedback print to log file
         self.declare_parameter("log_to_file", "")
         log_to_file = self.get_parameter("log_to_file").value
 
         self.feedback_collector = RosFeedbackCollector(
-            self.odom_frame, output_dir, log_to_file
+            self.odom_frame, output_dir, log_to_file, robot_color=robot_color
         )
         self.feedback_collector.compress_manipulation_requests = bool(
             compress_manipulation_requests
