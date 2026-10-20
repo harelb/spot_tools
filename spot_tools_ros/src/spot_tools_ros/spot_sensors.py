@@ -219,6 +219,24 @@ def missing_sources(sources, available):
     return [x for x in sources if x not in available]
 
 
+# Cameras requested even without subscribers: the image responses carry the
+# transform snapshots that publish each camera's (static) frames, and ADT4's
+# platform calibration hangs the ZED off <robot>/frontleft, so those frames must
+# exist even when nobody reads the Spot images themselves.
+ALWAYS_REQUEST = ["frontleft", "frontright"]
+
+
+def active_cameras(names, has_subscribers, always=()):
+    """Cameras (in ``names`` order) to request this cycle.
+
+    ``has_subscribers`` maps camera name -> whether any of its color (raw or
+    compressed), depth or camera_info topics has a subscriber; cameras in
+    ``always`` are requested regardless.
+    """
+    always = set(always)
+    return [n for n in names if n in always or has_subscribers.get(n, False)]
+
+
 class CameraPublisher:
     """Publisher for a single camera."""
 
@@ -294,7 +312,8 @@ class CameraPublisher:
             build_image_request(self.depth_source, **depth_kwargs),
         ]
 
-    def _has_work(self):
+    def has_subscribers(self):
+        """Any subscriber on this camera's color (as published), depth or info."""
         return (
             self._rgb_pub.get_subscription_count() > 0
             or self._rgb_info_pub.get_subscription_count() > 0
@@ -303,7 +322,7 @@ class CameraPublisher:
         )
 
     def publish(self, logger, robot, color, depth):
-        if not self._has_work():
+        if not self.has_subscribers():
             return
 
         color_stamp = _get_local_time(robot, color.shot.acquisition_time)
@@ -391,6 +410,10 @@ class SpotClientNode(Node):
             self._cameras[camera] = cam
 
         self.get_logger().info(f"Publishing cameras {list(self._cameras)}")
+        # [""] (ROS has no empty string-array literal) means none
+        always = self._get_param("always_request", ALWAYS_REQUEST).string_array_value
+        self._always_request = [x for x in always if x]
+        self._active = None
 
         allowed_parents = ["vision", "odom", "body"]
         self._parent_frame = self._get_param("parent_frame", "vision").string_value
@@ -557,11 +580,20 @@ class SpotClientNode(Node):
 
     def _camera_callback(self):
         """Poll Spot for new image messages and publish."""
-        names = []
+        # Only cameras someone reads (plus ALWAYS_REQUEST): every requested source
+        # costs Spot image-service time and slows the cameras mapping depends on.
+        names = active_cameras(
+            list(self._cameras),
+            {n: cam.has_subscribers() for n, cam in self._cameras.items()},
+            self._always_request,
+        )
+        if names != self._active:
+            self.get_logger().info(f"Requesting cameras {names}")
+            self._active = names
+
         requests = []
-        for name, camera in self._cameras.items():
-            requests += camera.requests(self._use_grayscale)
-            names.append(name)
+        for name in names:
+            requests += self._cameras[name].requests(self._use_grayscale)
 
         if not requests:
             return
