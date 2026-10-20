@@ -115,6 +115,15 @@ def test_deadman_stops_after_silence():
     assert t.state()["commanded"] == {"vx": 0.0, "vy": 0.0, "wz": 0.0}
 
 
+def test_quiet_after_zero_is_idle_not_deadman():
+    t, spot, _, clock = make()
+    t.cmd_vel(0.3, 0, 0)
+    t.cmd_vel(0, 0, 0)
+    clock.t += 0.6
+    t.tick()
+    assert not t.active and t.last_event.startswith("teleop idle")
+
+
 def test_steady_commands_keep_deadman_alive():
     t, spot, _, clock = make()
     for _ in range(20):
