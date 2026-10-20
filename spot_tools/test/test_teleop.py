@@ -81,8 +81,15 @@ def test_velocity_is_clamped_to_caps():
 def test_caps_can_only_be_lowered():
     t, spot, _, _ = make(max_vx=2.0, max_vy=0.1, max_wz=-0.3)
     assert t.caps == {"vx": HARD_MAX["vx"], "vy": 0.1, "wz": 0.3}
-    t.cmd_vel(1.0, 1.0, -1.0)
+    t.cmd_vel(5.0, 1.0, -1.0)
     assert spot.twists[-1][:3] == (HARD_MAX["vx"], 0.1, -0.3)
+
+
+def test_full_speed_is_spot_top_speed():
+    assert HARD_MAX["vx"] == 1.6
+    t, spot, _, _ = make()
+    t.cmd_vel(1.6, 0.0, 0.0)
+    assert spot.twists[-1][:3] == (1.6, 0.0, 0.0)
 
 
 def test_within_caps_passes_through():
