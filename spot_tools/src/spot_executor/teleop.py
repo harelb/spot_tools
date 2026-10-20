@@ -190,7 +190,11 @@ class TeleopController:
                 return
             age = self.clock() - (self.last_cmd_t or 0.0)
             if age > self.deadman_s:
-                self._halt(f"deadman: no cmd_vel for {age:.2f} s")
+                if all(abs(v) < ZERO_EPS for v in self.commanded):
+                    # the operator stopped (last command zero), then went quiet
+                    self._halt(f"teleop idle: no cmd_vel for {age:.2f} s")
+                else:
+                    self._halt(f"deadman: no cmd_vel for {age:.2f} s")
                 return
             reason = self.interlock()
             if reason:

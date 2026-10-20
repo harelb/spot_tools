@@ -889,6 +889,7 @@ class SpotExecutorRos(Node):
         )
         self._teleop_standing = None
         self._teleop_state_tick = 0
+        self._teleop_was_active = False
         self.teleop_state_pub = self.create_publisher(String, "~/teleop_state", 1)
         self.cmd_vel_sub = self.create_subscription(
             Twist,
@@ -920,20 +921,25 @@ class SpotExecutorRos(Node):
 
     def _posture_service(self, fn, response):
         response.success, response.message = fn()
-        self.publish_teleop_state()
+        self.publish_teleop_state(refresh_standing=True)
         return response
 
     def teleop_tick(self):
-        """Deadman at 20 Hz; teleop state at 5 Hz while active, else 1 Hz."""
+        """Deadman at 20 Hz; teleop state at 5 Hz while active, else 1 Hz, and
+        at once when teleop starts or stops."""
         self.teleop.tick()
         self._teleop_state_tick += 1
-        every = 4 if self.teleop.active else 20
-        if self._teleop_state_tick % every == 0:
-            self.publish_teleop_state()
+        active = self.teleop.active
+        every = 4 if active else 20
+        if active != self._teleop_was_active or self._teleop_state_tick % every == 0:
+            self.publish_teleop_state(
+                refresh_standing=self._teleop_state_tick % 20 == 0
+            )
+        self._teleop_was_active = active
 
-    def publish_teleop_state(self):
+    def publish_teleop_state(self, refresh_standing=False):
         try:
-            if self._teleop_state_tick % 20 == 0 or self._teleop_standing is None:
+            if refresh_standing or self._teleop_standing is None:
                 self._teleop_standing = self.teleop.robot_standing()
             st = self.teleop.state(self._teleop_standing)
             st["robot"] = self.get_namespace().strip("/")
