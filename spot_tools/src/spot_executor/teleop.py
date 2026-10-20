@@ -122,6 +122,7 @@ class TeleopController:
         self.last_event = ""
         self.commands = 0
         self.rejected = 0
+        self._time_synced = False
 
     # ------------------------------------------------------------ interlock
     def plan_executing(self) -> bool:
@@ -169,6 +170,7 @@ class TeleopController:
                     self._halt(f"teleop cancelled: {reason}")
                 return self._reject(reason)
             try:
+                self._ensure_time_sync()
                 send_body_velocity(self.spot, *cmd, self.command_duration_s)
             except Exception as e:  # noqa: BLE001 -- e.g. LeaseUseError
                 self.active = False
@@ -182,6 +184,16 @@ class TeleopController:
             self.commands += 1
             self.last_reject = ""
             return True, "ok"
+
+    def _ensure_time_sync(self) -> None:
+        """A command with an end time needs the robot clock: on a real Spot
+        nothing may have started time sync yet if no plan ran since boot."""
+        if self._time_synced:
+            return
+        ts = getattr(getattr(self.spot, "robot", None), "time_sync", None)
+        if ts is not None:
+            ts.wait_for_sync()
+        self._time_synced = True
 
     def tick(self) -> None:
         """Deadman + interlock watch; call at >= 10 Hz."""
