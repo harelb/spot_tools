@@ -115,6 +115,10 @@ class Spot:
             end_time_secs=time.time() + 0.5,
         )
 
+    def stop(self):
+        """Halt all motion where the robot is. Never powers on or stands up."""
+        self.command_client.robot_command(RobotCommandBuilder.stop_command())
+
     def get_image(self, view="hand_color_image", show=False):
         self.robot.logger.info("Getting an image from: %s", view)
         image_responses = self.image_client.get_image_from_sources([view])

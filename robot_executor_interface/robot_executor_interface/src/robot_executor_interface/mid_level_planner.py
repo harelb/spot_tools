@@ -191,6 +191,7 @@ class MidLevelPlannerOutput:
     target_point_metric: np.ndarray
     path_shapely: shapely.LineString
     path_waypoints_metric: list
+    global_path_target_point_metric: np.ndarray
 
 
 class MidLevelPlanner:
@@ -304,6 +305,9 @@ class MidLevelPlanner:
                 ),
                 path_shapely=shapely.LineString(high_level_path_metric[:, :2]),
                 path_waypoints_metric=[],
+                global_path_target_point_metric=self.grid_cell_to_global_pose(
+                    target_point_grid
+                ),
             )
 
             # plan using a_star
@@ -321,7 +325,13 @@ class MidLevelPlanner:
                 self.grid_cell_to_global_pose((pt[0], pt[1])) for pt in a_star_path_grid
             ]
             a_star_path_metric = np.array(a_star_path_metric).reshape(-1, 4)
-            a_star_path_metric = a_star_path_metric[:, :2]
+            a_star_path_metric = a_star_path_metric[:, :2].reshape(-1, 2)
+            # TODO(multy) temp fix for visualization if a star only output one point
+            # in fact, this is probably reaching a local min we plan can't go farther.
+            if len(a_star_path_metric) == 1:
+                a_star_path_metric = np.vstack(
+                    (a_star_path_metric[0], a_star_path_metric)
+                )
             a_star_path_execute = a_star_path_metric
             output.path_shapely = shapely.LineString(a_star_path_execute)
             output.path_waypoints_metric = a_star_path_metric
@@ -547,5 +557,6 @@ class IdentityPlanner:
             target_point_metric=None,
             path_shapely=shapely.LineString(high_level_path_metric[:, :2]),
             path_waypoints_metric=None,
+            global_path_target_point_metric=None,
         )
         return True, output

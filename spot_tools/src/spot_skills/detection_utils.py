@@ -15,6 +15,7 @@ class DetectionCandidate:
     bosdyn_image: image_pb2.ImageResponse
     cv2_image: np.ndarray
     detection_xy: Optional[tuple[int, int]]
+    source_name: str
 
 
 class Detector:
@@ -93,7 +94,9 @@ class YOLODetector(Detector):
             primary_cv2_image, semantic_class, rotate=0, debug=debug
         )
         detection_candidates.append(
-            DetectionCandidate(primary_bosdyn_image, primary_cv2_image, primary_xy)
+            DetectionCandidate(
+                primary_bosdyn_image, primary_cv2_image, primary_xy, img_source
+            )
         )
 
         # If primary image has a detection, just get the images from the other image sources; Otherwise, look for detections
@@ -187,7 +190,7 @@ class YOLODetector(Detector):
         for source in sources:
             bosdyn_image, cv2_image = self.spot.get_image_RGB(view=source.name)
             detection_candidates.append(
-                DetectionCandidate(bosdyn_image, cv2_image, None)
+                DetectionCandidate(bosdyn_image, cv2_image, None, source.name)
             )
         return detection_candidates
 
@@ -223,7 +226,7 @@ class YOLODetector(Detector):
             if xy is None:
                 print(f"Object not found in {image_source}.")
 
-            candidates.append(DetectionCandidate(image, img, xy))
+            candidates.append(DetectionCandidate(image, img, xy, image_source))
             if xy is not None and detection_index is None:
                 detection_index = len(candidates) - 1
 

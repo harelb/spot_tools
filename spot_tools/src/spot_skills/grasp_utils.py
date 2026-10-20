@@ -107,33 +107,39 @@ def force_stow_arm(manipulation_client, state_client, command_client):
     block_until_arm_arrives(command_client, cmd_id)
 
 
-def object_place(spot, semantic_class="bag", position=None):
-    """Drop a grasped object."""
+def object_place(spot, semantic_class="bag", position=None, should_stop=lambda: False):
+    """Drop a grasped object.
+
+    should_stop() is checked between steps: once it is True the robot does not
+    move again. Returns False if it stopped before letting go of the object.
+    """
 
     if spot.is_fake:
         return True
 
     time.sleep(0.25)
+    if should_stop():
+        return False
 
     carry_cmd = RobotCommandBuilder.arm_carry_command()
     spot.command_client.robot_command(carry_cmd)
     time.sleep(1)
+    if should_stop():
+        return False
 
     open_gripper(spot)
     stow_arm(spot)
     close_gripper(spot)
-    execute_recovery_action(
-        spot,
-        recover_arm=False,
-        relative_pose=math_helpers.SE2Pose(x=-1.0, y=0.0, angle=0),
-    )
-    time.sleep(1)
-    execute_recovery_action(
-        spot,
-        recover_arm=False,
-        relative_pose=math_helpers.SE2Pose(x=0.0, y=-1.0, angle=0),
-    )
-    time.sleep(1)
+
+    # Step back and aside from the dropped object.
+    for step in (
+        math_helpers.SE2Pose(x=-1.0, y=0.0, angle=0),
+        math_helpers.SE2Pose(x=0.0, y=-1.0, angle=0),
+    ):
+        if should_stop():
+            break
+        execute_recovery_action(spot, recover_arm=False, relative_pose=step)
+        time.sleep(1)
     return True
 
 
@@ -147,7 +153,9 @@ def object_grasp(
     debug=False,
     feedback=None,
     carry_high=True,
+    should_stop=lambda: False,
 ):
+    """Pick an object. should_stop() aborts the grasp; the robot then stays put."""
     debug_images = []
 
     """Using the Boston Dynamics API to command Spot's arm"""
@@ -187,7 +195,7 @@ def object_grasp(
         else:
             image, img = spot.get_image_RGB(view=image_source)
             xy = get_user_grasp_input(spot, img)
-            candidates = [DetectionCandidate(image, img, xy)]
+            candidates = [DetectionCandidate(image, img, xy, image_source)]
             detection_index = 0
             print("Found object centroid:", xy)
 
@@ -210,6 +218,7 @@ def object_grasp(
     # Display all candidate images in the approval panel
     if feedback is not None:
         cv2_images = [copy(c.cv2_image) for c in candidates]
+        source_names = [c.source_name for c in candidates]
 
         if detection_index is not None:
             xy = candidates[detection_index].detection_xy
@@ -221,6 +230,7 @@ def object_grasp(
 
         approved, updated_xy, selected_index = feedback.bounding_box_detection_feedback(
             cv2_images,
+            source_names,
             detection_index,
             det_x,
             det_y,
@@ -278,6 +288,11 @@ def object_grasp(
     success = False
     # Get feedback from the robot
     while True:
+        if should_stop():
+            if feedback is not None:
+                feedback.print("INFO", "Pick interrupted.")
+            return (False, debug_images) if debug else False
+
         current_time = time.time()
         if current_time - loop_timer > 15:
             if feedback is not None:
@@ -322,6 +337,8 @@ def object_grasp(
 
     # If the robot was not successful, send it back to the location it started the skill at
     if not success:
+        if should_stop():
+            return (False, debug_images) if debug else False
         execute_recovery_action(
             spot,
             recover_arm=True,

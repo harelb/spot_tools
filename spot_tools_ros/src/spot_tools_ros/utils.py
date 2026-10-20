@@ -19,7 +19,9 @@ def waypoints_to_path(fixed_frame, waypoints):
     path_viz.header.stamp = now
     path_viz.header.frame_id = frame_name
 
-    q = [0, 0, 0, 1]
+    # Floats, not ints: a one-waypoint path never computes a heading, and an
+    # int in a float field aborts the process inside rclpy's C conversion.
+    q = [0.0, 0.0, 0.0, 1.0]
     for w, wnext in zip_longest(waypoints, waypoints[1:]):
         p = PoseStamped()
         p.header.frame_id = frame_name
