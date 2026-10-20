@@ -14,5 +14,6 @@ bool powered_on
 bool power_known
 bool lease_owned
 bool lease_known
+string lease_owner           # client name holding the body lease ("" = nobody/unknown)
 string[] faults              # active behavior/system fault names
 string notes

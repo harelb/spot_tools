@@ -37,6 +37,7 @@ from spot_executor.fake_spot import FakeSpot
 from spot_executor.spot import Spot
 from spot_skills.detection_utils import YOLODetector
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
 from robot_executor_interface.action_descriptions import Follow, Gaze, Pick, Place
@@ -523,6 +524,18 @@ def resolve_spot_interface(spot_interface: str, use_fake_spot_interface: bool) -
     return "fake" if use_fake_spot_interface else "real"
 
 
+def take_lease_report(lease_manager) -> tuple[bool, str]:
+    """Force-take the lease via ``lease_manager``; ``(success, message)`` with the
+    owner before and after.  Never raises (a service callback must not)."""
+    try:
+        before, after = lease_manager.force_take()
+    except Exception as e:  # noqa: BLE001
+        return False, f"take failed: {type(e).__name__}: {e}"
+    ours = str(after).startswith("understanding")
+    msg = f"lease owner before: {before or '(nobody)'}; after: {after or '(nobody)'}"
+    return ours, msg if ours else f"{msg} (not ours after take)"
+
+
 class SpotExecutorRos(Node):
     def __init__(self):
         super().__init__("spot_executor_ros")
@@ -833,6 +846,15 @@ class SpotExecutorRos(Node):
         )
         self.stop_sub = self.create_subscription(Bool, "~/stop", self.handle_stop, 10)
 
+        # Operator override (console "Take lease"): forcibly take the Spot lease,
+        # e.g. from the tablet. Own group: it blocks on the robot for a moment.
+        self.take_lease_srv = self.create_service(
+            Trigger,
+            "~/take_lease",
+            self.handle_take_lease,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
     def hb_callback(self):
         msg = NodeInfoMsg()
         msg.nickname = "spot_executor"
@@ -855,12 +877,15 @@ class SpotExecutorRos(Node):
             self.get_logger().warning(f"runtime guards: get_state failed: {e}")
             return
         lease_owned = None
+        owner = None
         lease_manager = getattr(self.spot_executor, "lease_manager", None)
         if lease_manager is not None:
             owner = getattr(lease_manager, "owner_name", None)
             if owner is not None:
                 lease_owned = str(owner).startswith("understanding")
-        guards = extract_runtime_guards(state, lease_owned=lease_owned)
+        guards = extract_runtime_guards(
+            state, lease_owned=lease_owned, lease_owner=owner
+        )
         msg = RuntimeGuardsMsg()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.robot_name = self.get_namespace().strip("/")
@@ -872,9 +897,21 @@ class SpotExecutorRos(Node):
         msg.power_known = bool(guards["power_known"])
         msg.lease_owned = bool(guards["lease_owned"])
         msg.lease_known = bool(guards["lease_known"])
+        msg.lease_owner = str(guards["lease_owner"])
         msg.faults = [str(f) for f in guards["faults"]]
         msg.notes = self.status_str
         self.runtime_guards_pub.publish(msg)
+
+    def handle_take_lease(self, request, response):
+        lease_manager = getattr(self.spot_executor, "lease_manager", None)
+        if lease_manager is None:
+            response.success = False
+            response.message = "no lease manager (executor not initialized)"
+            return response
+        response.success, response.message = take_lease_report(lease_manager)
+        log = self.get_logger().info if response.success else self.get_logger().error
+        log(f"take_lease: {response.message}")
+        return response
 
     def handle_pause(self, msg: Bool):
         if msg.data:

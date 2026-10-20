@@ -74,6 +74,25 @@ class LeaseManager:
         self.owner = leases[0].lease_owner
         self.owner_name = self.owner.client_name
 
+    def current_owner_name(self) -> str:
+        """Client name holding the body lease now ("" = nobody)."""
+        leases = self.spot_interface.lease_client.list_leases()
+        return leases[0].lease_owner.client_name if leases else ""
+
+    def force_take(self):
+        """Operator override: take the body lease from whoever holds it (e.g. the
+        tablet) and keep it alive.  Unlike the monitor thread's take-back (which
+        runs when nobody holds the lease and then stands the robot), this does not
+        stand, stow or move the robot.  Returns ``(owner_before, owner_after)``.
+        """
+        before = self.current_owner_name()
+        if self.feedback is not None:
+            self.feedback.log_lease_takeover(f"operator_takes_lease_from:{before}")
+        self.spot_interface.take_lease()
+        after = self.current_owner_name()
+        self.owner_name = after
+        return before, after
+
     def initialize_thread(self):
         def monitor_lease():
             while True:
