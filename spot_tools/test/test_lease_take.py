@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 
+from spot_executor.guards import extract_runtime_guards
 from spot_executor.spot_executor import LeaseManager
 
 TABLET = "bosdyn.android.spotapp spot-tablet"
@@ -120,3 +121,11 @@ def test_concurrent_takes_leave_only_one_keepalive(monkeypatch):
     assert len(keepers) == 2
     assert keepers[0].closed and not keepers[1].closed
     assert spot.lease_keep_alive is keepers[1]
+
+
+def test_guards_carry_lease_owner():
+    g = extract_runtime_guards(SimpleNamespace(), lease_owned=False, lease_owner=TABLET)
+    assert g["lease_known"] and not g["lease_owned"]
+    assert g["lease_owner"] == TABLET
+    g = extract_runtime_guards(SimpleNamespace())
+    assert g["lease_owner"] == "" and not g["lease_known"]

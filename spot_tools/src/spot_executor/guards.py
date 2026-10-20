@@ -10,18 +10,23 @@ warning: a missing guard stream must not brick planning).
 from __future__ import annotations
 
 
-def extract_runtime_guards(robot_state, lease_owned: bool | None = None) -> dict:
+def extract_runtime_guards(
+    robot_state, lease_owned: bool | None = None, lease_owner: str | None = None
+) -> dict:
     """RobotState proto (real or sim) -> guard snapshot dict.
 
     ``lease_owned`` comes from the executor's own lease manager (the proto's
     lease view describes clients generically; the executor knows whether IT
-    holds the body lease), ``None`` = unknown.
+    holds the body lease), ``None`` = unknown.  ``lease_owner`` is the client
+    name holding the body lease (e.g. the tablet's ``bosdyn.android.spotapp
+    ...``), "" when nobody holds it or it is unknown.
     """
     out = {
         "battery_percent": -1.0, "battery_known": False,
         "estop_pressed": False, "estop_known": False,
         "powered_on": False, "power_known": False,
         "lease_owned": bool(lease_owned), "lease_known": lease_owned is not None,
+        "lease_owner": str(lease_owner or ""),
         "faults": [],
     }
     try:
