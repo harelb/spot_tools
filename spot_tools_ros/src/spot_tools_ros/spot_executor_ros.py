@@ -963,12 +963,15 @@ class SpotExecutorRos(Node):
             self.get_logger().warning(f"runtime guards: get_state failed: {e}")
             return
         lease_owned = None
+        owner = None
         lease_manager = getattr(self.spot_executor, "lease_manager", None)
         if lease_manager is not None:
             owner = getattr(lease_manager, "owner_name", None)
             if owner is not None:
                 lease_owned = str(owner).startswith("understanding")
-        guards = extract_runtime_guards(state, lease_owned=lease_owned)
+        guards = extract_runtime_guards(
+            state, lease_owned=lease_owned, lease_owner=owner
+        )
         msg = RuntimeGuardsMsg()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.robot_name = self.get_namespace().strip("/")
@@ -980,6 +983,7 @@ class SpotExecutorRos(Node):
         msg.power_known = bool(guards["power_known"])
         msg.lease_owned = bool(guards["lease_owned"])
         msg.lease_known = bool(guards["lease_known"])
+        msg.lease_owner = str(guards["lease_owner"])
         msg.faults = [str(f) for f in guards["faults"]]
         msg.notes = self.status_str
         teleop = getattr(self, "teleop", None)
