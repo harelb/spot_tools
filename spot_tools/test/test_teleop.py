@@ -151,6 +151,16 @@ def test_zero_while_active_is_sent_and_refreshes_deadman():
     assert t.active
 
 
+def test_time_sync_once_before_first_command():
+    synced = []
+    spot = TwistSpot()
+    spot.robot = SimpleNamespace(time_sync=SimpleNamespace(wait_for_sync=lambda: synced.append(1)))
+    t, _, _, _ = make(spot=spot)
+    t.cmd_vel(0.1, 0, 0)
+    t.cmd_vel(0.2, 0, 0)
+    assert synced == [1] and len(spot.twists) == 2
+
+
 def test_robot_side_end_time_is_short():
     t, spot, _, _ = make()
     t.cmd_vel(0.1, 0, 0)
