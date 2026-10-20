@@ -28,7 +28,7 @@ import time
 import numpy as np
 
 # Absolute ceilings; the configured caps may only be lower.
-HARD_MAX = {"vx": 0.6, "vy": 0.4, "wz": 0.8}
+HARD_MAX = {"vx": 1.6, "vy": 0.4, "wz": 0.8}  # vx: Spot's top speed
 DEADMAN_S = 0.5
 # Robot-side end time of one velocity command: Spot stops on its own this long
 # after the last command, whatever happens to the executor.
