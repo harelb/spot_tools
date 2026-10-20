@@ -30,3 +30,18 @@ def test_missing_sources_skips_hand_without_arm():
     assert spot_sensors.missing_sources(hand, available) == hand
     body = ["back_fisheye_image", "back_depth_in_visual_frame"]
     assert spot_sensors.missing_sources(body, available) == []
+
+
+def test_active_cameras_only_with_subscribers_plus_always():
+    names = ["frontleft", "frontright", "left", "right", "back", "hand"]
+    subs = {"left": True, "back": False, "hand": True}
+    active = spot_sensors.active_cameras(names, subs, spot_sensors.ALWAYS_REQUEST)
+    assert active == ["frontleft", "frontright", "left", "hand"]
+
+
+def test_active_cameras_empty_when_nothing_needed():
+    names = ["left", "right"]
+    assert spot_sensors.active_cameras(names, {}, []) == []
+    # always-requested cameras the robot lacks (skipped at startup) never appear
+    assert spot_sensors.active_cameras(names, {}, ["frontleft"]) == []
+    assert spot_sensors.active_cameras(names, {"right": True}, []) == ["right"]
