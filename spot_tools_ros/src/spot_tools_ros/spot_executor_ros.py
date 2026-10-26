@@ -21,7 +21,7 @@ from nlu_interface_rviz.msg import (
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSDurabilityPolicy, QoSProfile
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from robot_executor_interface_ros.action_descriptions_ros import from_msg
 from robot_executor_msgs.msg import (
     ActionDoneMsg,
@@ -628,6 +628,9 @@ class SpotExecutorRos(Node):
         self.declare_parameter("use_cost_map", False)
         self.declare_parameter("cost_map_safe_distance", 0.5)
         self.declare_parameter("cost_map_nearest_obstacle_cost", 5.0)
+        # Seconds to wait on other robots (ordering / joint tasks) before giving
+        # up the plan; 0 waits forever.
+        self.declare_parameter("plan_wait_timeout_s", 900.0)
         mid_level_planner_type = self.get_parameter("mid_level_planner_type").value
         lookahead_distance = self.get_parameter("lookahead_distance").value
         assert lookahead_distance > 0
@@ -751,12 +754,19 @@ class SpotExecutorRos(Node):
         # Fleet-wide, deliberately not under ~: every robot has to hear every
         # other robot's progress for an ordering to be executable without a
         # coordinator. Remap at launch if a deployment needs it namespaced.
+        # Transient-local so a robot whose executor (re)starts late still gets
+        # the progress already reported; a lost DONE would stall its partners.
+        progress_qos = QoSProfile(
+            depth=100,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
         self.plan_progress_pub = self.create_publisher(
-            PlanProgressMsg, "/plan_progress", 10
+            PlanProgressMsg, "/plan_progress", progress_qos
         )
         self.plan_progress = PlanProgress(publish=self._publish_plan_progress)
         self.create_subscription(
-            PlanProgressMsg, "/plan_progress", self._handle_plan_progress, 10
+            PlanProgressMsg, "/plan_progress", self._handle_plan_progress, progress_qos
         )
 
         self.spot_executor = se.SpotExecutor(
@@ -771,6 +781,7 @@ class SpotExecutorRos(Node):
             walk_to_standoff=pick_walk_to_standoff,
             walk_to_max_distance=pick_walk_to_max_distance,
             plan_progress=self.plan_progress,
+            plan_wait_timeout_s=float(self.get_parameter("plan_wait_timeout_s").value),
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
@@ -814,9 +825,7 @@ class SpotExecutorRos(Node):
         subscribing to the same topic we publish on keeps every robot's view
         built the same way, rather than one path for self and one for others.
         """
-        self.plan_progress.record(
-            msg.plan_id, msg.robot_name, msg.task_id, msg.state
-        )
+        self.plan_progress.record(msg.plan_id, msg.robot_name, msg.task_id, msg.state)
 
     def hb_callback(self):
         msg = NodeInfoMsg()
@@ -848,8 +857,8 @@ class SpotExecutorRos(Node):
         # An exception escaping a subscription callback tears down the rclpy
         # executor and kills the node. Plan repair means many preemptions in a
         # row, so one bad plan must degrade rather than end the run.
-        self.plan_progress.retain_only(msg.plan_id)
         try:
+            self.plan_progress.retain_only(msg.plan_id)
             self._process_action_sequence(msg)
         except Exception:
             self.status_str = "Idle"

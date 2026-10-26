@@ -16,6 +16,8 @@ Empty ordering fields mean "no constraint", which is what the fast-downward
 path produces -- it has no schedule at all -- so that planner is unaffected.
 """
 
+import threading
+
 READY = "READY"
 DONE = "DONE"
 
@@ -36,6 +38,9 @@ class PlanProgress:
         self._done = {}  # plan_id -> {task_id}
         self._ready = {}  # plan_id -> {task_id: {robot_name}}
         self._announced = set()  # (plan_id, task_id) we have already reported READY for
+        # Reports arrive on the ROS callback thread while the executor thread
+        # gates and announces; a new plan forgets the old one from a third.
+        self._lock = threading.RLock()
 
     # ---------- what we hear ----------
 
@@ -43,18 +48,20 @@ class PlanProgress:
         """Fold in one report, whoever it came from."""
         if not plan_id or not task_id:
             return
-        if state == DONE:
-            self._done.setdefault(plan_id, set()).add(task_id)
-        elif state == READY:
-            self._ready.setdefault(plan_id, {}).setdefault(task_id, set()).add(
-                robot_name
-            )
+        with self._lock:
+            if state == DONE:
+                self._done.setdefault(plan_id, set()).add(task_id)
+            elif state == READY:
+                self._ready.setdefault(plan_id, {}).setdefault(task_id, set()).add(
+                    robot_name
+                )
 
     def forget(self, plan_id):
         """Drop one plan's state."""
-        self._done.pop(plan_id, None)
-        self._ready.pop(plan_id, None)
-        self._announced = {k for k in self._announced if k[0] != plan_id}
+        with self._lock:
+            self._done.pop(plan_id, None)
+            self._ready.pop(plan_id, None)
+            self._announced = {k for k in self._announced if k[0] != plan_id}
 
     def retain_only(self, plan_id):
         """Drop every plan but this one.
@@ -64,8 +71,10 @@ class PlanProgress:
         plan repeatedly would otherwise accumulate one entry set per superseded
         plan for as long as the node lives.
         """
-        for stale in [k for k in list(self._done) + list(self._ready) if k != plan_id]:
-            self.forget(stale)
+        with self._lock:
+            stale = [k for k in list(self._done) + list(self._ready) if k != plan_id]
+            for k in stale:
+                self.forget(k)
 
     # ---------- what we say ----------
 
@@ -73,19 +82,31 @@ class PlanProgress:
         """Say we are in position for a task. Idempotent: the gate re-runs every
         poll and the fleet does not need one message per poll."""
         key = (plan_id, task_id)
-        if not plan_id or not task_id or key in self._announced:
+        if not plan_id or not task_id:
             return
-        self._announced.add(key)
+        with self._lock:
+            if key in self._announced:
+                return
+            self._announced.add(key)
         self.record(plan_id, robot_name, task_id, READY)
         if self._publish is not None:
             self._publish(plan_id, robot_name, task_id, READY)
 
     def announce_done(self, plan_id, robot_name, task_id):
+        """Say we finished a task, plainly and as "<task>@<robot>".
+
+        A task after a JOINT task waits for every member to finish, so the
+        planner names its predecessors per member ("3@hilbert", "3@euclid");
+        a task after a solo one waits on the plain id. Reporting both covers
+        either without the executor knowing which kind it was.
+        """
         if not plan_id or not task_id:
             return
-        self.record(plan_id, robot_name, task_id, DONE)
-        if self._publish is not None:
-            self._publish(plan_id, robot_name, task_id, DONE)
+        ids = [task_id] + ([f"{task_id}@{robot_name}"] if robot_name else [])
+        for done_id in ids:
+            self.record(plan_id, robot_name, done_id, DONE)
+            if self._publish is not None:
+                self._publish(plan_id, robot_name, done_id, DONE)
 
     # ---------- the gate ----------
 
@@ -102,7 +123,8 @@ class PlanProgress:
             return []
 
         reasons = []
-        done = self._done.get(plan_id, set())
+        with self._lock:
+            done = set(self._done.get(plan_id, set()))
         for task_id in after:
             if task_id not in done:
                 reasons.append(f"task {task_id} not finished")
@@ -114,9 +136,9 @@ class PlanProgress:
             # partner start the joint task without us.
             if not reasons:
                 self.announce_ready(plan_id, robot_name, task_id)
-                waiting = set(coalition) - self._ready.get(plan_id, {}).get(
-                    task_id, set()
-                )
+                with self._lock:
+                    ready = set(self._ready.get(plan_id, {}).get(task_id, set()))
+                waiting = set(coalition) - ready
                 if waiting:
                     reasons.append(f"coalition partners {sorted(waiting)} not ready")
         return reasons

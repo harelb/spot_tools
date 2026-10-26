@@ -143,6 +143,7 @@ class SpotExecutor:
         walk_to_standoff=1.5,
         walk_to_max_distance=5.0,
         plan_progress=None,
+        plan_wait_timeout_s=900.0,
     ):
         self.debug = False
         self.spot_interface = spot_interface
@@ -164,6 +165,10 @@ class SpotExecutor:
         # one finishes, which is the behaviour every planner had before and is
         # still what the fast-downward path gets -- it emits no ordering.
         self.plan_progress = plan_progress
+        # How long to wait on other robots before giving up the sequence;
+        # 0 waits forever. A partner that crashed or was e-stopped never
+        # reports, and without this the robot would stand still silently.
+        self.plan_wait_timeout_s = plan_wait_timeout_s
         self._pause_lock = threading.Lock()
 
         self.lease_manager = None
@@ -250,7 +255,7 @@ class SpotExecutor:
 
             ix = 0
             inner_loop_attempts = 0
-            waiting_on = None
+            waiting_on, waiting_since, warned_at = None, None, None
             while ix < len(sequence.actions):
                 # Honor pause requests between actions
                 while True:
@@ -290,10 +295,6 @@ class SpotExecutor:
                 pick_next = False
                 if ix < len(sequence.actions) - 1:
                     pick_next = type(sequence.actions[ix + 1]) is Pick
-                feedback.print("INFO", "\n")
-                feedback.print("INFO", "Spot executor executing command: ")
-                feedback.print("INFO", command)
-
                 # Wait for the tasks this one must follow, and for coalition
                 # partners to reach their own start. Polling rather than
                 # blocking so a pause, a lost lease or a preemption is still
@@ -304,12 +305,36 @@ class SpotExecutor:
                         sequence.plan_id, command, sequence.robot_name
                     )
                     if blocked:
+                        now = time.time()
                         if waiting_on != blocked:
                             feedback.print("INFO", f"Waiting on: {'; '.join(blocked)}")
                             waiting_on = blocked
+                            waiting_since = waiting_since or now
+                            warned_at = now
+                        waited = now - waiting_since
+                        if (
+                            self.plan_wait_timeout_s
+                            and waited > self.plan_wait_timeout_s
+                        ):
+                            feedback.print(
+                                "ERROR",
+                                f"Gave up after waiting {waited:.0f} s on: "
+                                f"{'; '.join(blocked)}. Stopping this plan.",
+                            )
+                            break
+                        if now - warned_at > 30.0:
+                            feedback.print(
+                                "WARN",
+                                f"Still waiting ({waited:.0f} s) on: {'; '.join(blocked)}",
+                            )
+                            warned_at = now
                         time.sleep(0.1)
                         continue
-                    waiting_on = None
+                    waiting_on, waiting_since = None, None
+
+                feedback.print("INFO", "\n")
+                feedback.print("INFO", "Spot executor executing command: ")
+                feedback.print("INFO", command)
 
                 success = False
                 feedback.plan_valid = True
@@ -346,9 +371,11 @@ class SpotExecutor:
                         # action belongs to a different one.
                         if self.plan_progress is not None:
                             task_id = getattr(command, "task_id", "")
-                            nxt = sequence.actions[ix + 1] if ix + 1 < len(
-                                sequence.actions
-                            ) else None
+                            nxt = (
+                                sequence.actions[ix + 1]
+                                if ix + 1 < len(sequence.actions)
+                                else None
+                            )
                             if task_id and (
                                 nxt is None or getattr(nxt, "task_id", "") != task_id
                             ):
