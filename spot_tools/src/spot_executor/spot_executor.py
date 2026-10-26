@@ -426,7 +426,12 @@ class SpotExecutor:
         path_distance = np.sum(
             np.linalg.norm(np.diff(command_to_send[:, :2], axis=0), axis=1)
         )
-        timeout = path_distance * 6
+        # Count the approach to the first waypoint too, and give every path a
+        # few seconds: a one-waypoint path has zero length, so it used to time
+        # out before the follower could see the robot was already there.
+        start = np.array(self.spot_interface.get_pose()[:2])
+        path_distance += np.linalg.norm(command_to_send[0, :2] - start)
+        timeout = max(path_distance * 6, 5.0)
         feedback.print(
             "INFO",
             f"Using continous follower with params:\n\tlookahead: {self.follower_lookahead}\n\tgoal tolerance: {self.goal_tolerance}\n\ttimeout: {timeout}",
