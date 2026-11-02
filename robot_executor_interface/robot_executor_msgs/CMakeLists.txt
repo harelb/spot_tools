@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ActionResultMsg.msg"
   "msg/RuntimeGuardsMsg.msg"
   "msg/ActionDoneMsg.msg"
+  "msg/PlanProgressMsg.msg"
   DEPENDENCIES std_msgs nav_msgs geometry_msgs
 )
 
