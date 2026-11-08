@@ -29,6 +29,7 @@ from sensor_msgs.msg import Image
 from shapely.geometry import Point
 from spot_executor.fake_spot import FakeSpot
 from spot_executor.spot import Spot
+from spot_skills.approval import ApprovalDecision
 from spot_skills.detection_utils import YOLODetector
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -89,6 +90,8 @@ class RosFeedbackCollector:
         self.pick_confirmation_approved = False
         self.pick_confirmation_xy = [0, 0]
         self.pick_confirmation_image_index = 0
+        self.pick_confirmation_walk_to = False
+        self.pick_confirmation_stand_xy = None
 
         self.break_out_of_waiting_loop = False
         self.plan_valid = True
@@ -166,16 +169,39 @@ class RosFeedbackCollector:
 
         if self.break_out_of_waiting_loop:
             self.logger.info("ROBOT WAS PREEMPTED")
-            self.pick_confirmation_approved = False
-        else:
-            self.logger.info(
-                f"Pick Confirmation Response Received: approved ({self.pick_confirmation_approved}), xy ({self.pick_confirmation_xy}), image_index ({self.pick_confirmation_image_index})"
-            )
+            return ApprovalDecision.reject()
 
-        return (
-            self.pick_confirmation_approved,
-            self.pick_confirmation_xy,
-            self.pick_confirmation_image_index,
+        self.logger.info(
+            f"Pick Confirmation Response Received: approved ({self.pick_confirmation_approved}), "
+            f"walk_to ({self.pick_confirmation_walk_to}), xy ({self.pick_confirmation_xy}), "
+            f"image_index ({self.pick_confirmation_image_index}), "
+            f"stand_xy ({self.pick_confirmation_stand_xy})"
+        )
+        pixel = (self.pick_confirmation_xy[0], self.pick_confirmation_xy[1])
+        if self.pick_confirmation_walk_to:
+            return ApprovalDecision.walk(
+                pixel,
+                self.pick_confirmation_image_index,
+                stand_pixel=self.pick_confirmation_stand_xy,
+            )
+        if self.pick_confirmation_approved:
+            return ApprovalDecision.approve(pixel, self.pick_confirmation_image_index)
+        return ApprovalDecision.reject()
+
+    def walk_to_feedback(self, target_point, stand_pose):
+        """Show where the operator's walk-to click landed and where Spot will stand."""
+        target = PointMsg()
+        target.x, target.y, target.z = (float(v) for v in target_point[:3])
+        stand = PointMsg()
+        stand.x, stand.y = float(stand_pose[0]), float(stand_pose[1])
+        stand.z = float(target_point[2])
+        self.walk_to_pub.publish(
+            build_markers(
+                [target, stand],
+                ["walk_to_target", "walk_to_stand"],
+                ["vision", "vision"],
+                [[1, 0.5, 0], [0, 0.5, 1]],
+            )
         )
 
     def pick_image_feedback(self, semantic_image, mask_image):
@@ -316,6 +342,10 @@ class RosFeedbackCollector:
             qos_profile=latching_qos,
         )
 
+        self.walk_to_pub = node.create_publisher(
+            MarkerArray, "~/walk_to_visualizer", qos_profile=latching_qos
+        )
+
         self.lease_takeover_publisher = node.create_publisher(String, "~/takeover", 10)
 
         node.create_subscription(
@@ -413,17 +443,27 @@ class RosFeedbackCollector:
 
         # self.pick_confirmation_event.set()
 
-        # If not approved, discontinue
-        # If approved, check whether the detection is overwritten
-        if not msg.approve:
-            self.logger.warn("Detection is invalid. Discontinuing pick action.")
-            self.pick_confirmation_approved = False
-        else:
+        # Three outcomes: approve (grasp here), walk_to (move closer and ask
+        # again), or neither (abandon the attempt).
+        self.pick_confirmation_walk_to = bool(msg.walk_to) and not msg.approve
+        self.pick_confirmation_stand_xy = None
+        if msg.approve:
             self.pick_confirmation_approved = True
             self.pick_confirmation_image_index = msg.image_index
             self.pick_confirmation_xy[0] = msg.image_x
             self.pick_confirmation_xy[1] = msg.image_y
             self.logger.warn("Detection is valid. Continuing pick action!")
+        elif self.pick_confirmation_walk_to:
+            self.pick_confirmation_approved = False
+            self.pick_confirmation_image_index = msg.image_index
+            self.pick_confirmation_xy[0] = msg.image_x
+            self.pick_confirmation_xy[1] = msg.image_y
+            if msg.has_stand_point:
+                self.pick_confirmation_stand_xy = (msg.stand_x, msg.stand_y)
+            self.logger.warn("Operator asked to walk closer before picking.")
+        else:
+            self.logger.warn("Detection is invalid. Discontinuing pick action.")
+            self.pick_confirmation_approved = False
         self.pick_confirmation_event.set()
 
     def log_lease_takeover(self, event: str):
@@ -472,6 +512,10 @@ class SpotExecutorRos(Node):
         self.declare_parameter("labelspace_grouping_path", "")
         self.declare_parameter("detector_model_path", "")
         detector_model_path = self.get_parameter("detector_model_path").value
+        # Distance short of an operator's walk-to point at which Spot stops to
+        # re-detect, when no explicit stand point was chosen.
+        self.declare_parameter("pick_walk_to_standoff", 1.0)
+        pick_walk_to_standoff = self.get_parameter("pick_walk_to_standoff").value
         # semantic_model_path = self.get_parameter("semantic_model_path").value
         # labelspace_path = self.get_parameter("labelspace_path").value
         # semantic_name_to_id = load_inverse_semantic_id_map_from_label_space(
@@ -653,6 +697,7 @@ class SpotExecutorRos(Node):
             goal_tolerance,
             self.feedback_collector,
             use_fake_path_plan,
+            walk_to_standoff=pick_walk_to_standoff,
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 

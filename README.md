@@ -102,4 +102,32 @@ The mid-level planner should:
 - Generate locally optimal paths that avoid obstacles
 - Publish the resulting path for execution by the robot controller
 
-This testing setup allows you to validate the mid-level planner's obstacle avoidance, path smoothing, and local optimization capabilities in a controlled simulation environment. 
+This testing setup allows you to validate the mid-level planner's obstacle avoidance, path smoothing, and local optimization capabilities in a controlled simulation environment.
+
+## Operator approval and walk-to during Pick
+
+Every `Pick` (and `Drag`) grasp is reviewed by an operator. The executor publishes a
+`ManipulationApprovalRequest` with one image per camera on
+`~/manipulation_request` and blocks until a `ManipulationApprovalResponse`
+arrives on `~/pick_confirmation`. The response has three outcomes:
+
+| Response | Robot behaviour |
+| --- | --- |
+| `approve=true` | Grasp at the selected pixel in the selected image. |
+| `approve=false` | Abandon this grasp attempt (the executor may retry the action). |
+| `approve=false, walk_to=true` | Stow the arm, walk toward the selected ground/object pixel, capture new images and ask again. Repeats until approve/reject, within one grasp attempt. |
+
+Walk-to lifts the pixel onto Spot's ground plane estimate using the image's pinhole
+model and transform snapshot (`spot_skills/walk_to_utils.py`), then drives to a
+standoff pose facing that point. The standoff distance is the executor parameter
+`pick_walk_to_standoff` (default `1.0` m). If the response carries a stand point
+(`has_stand_point`, `stand_x`, `stand_y`), the robot stands on that ground pixel
+instead and faces the target from there, which gives the operator heading control;
+the operator UIs keep that option behind a flag that is off by default. The
+planned target and stand pose are published as markers on `~/walk_to_visualizer`
+in the `vision` frame.
+
+Pausing or terminating the plan interrupts a walk-to like any other motion. The
+offline tests `spot_tools/examples/test_walk_to_geometry.py` and
+`spot_tools/examples/test_object_grasp_walk_to.py` cover the geometry and the
+approval loop without a robot or the Boston Dynamics SDK. 

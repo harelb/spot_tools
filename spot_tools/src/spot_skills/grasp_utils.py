@@ -25,6 +25,7 @@ from bosdyn.client.frame_helpers import (
 )
 from bosdyn.client.robot_command import RobotCommandBuilder, block_until_arm_arrives
 
+from spot_skills.approval import ApprovalDecision
 from spot_skills.arm_utils import (
     close_gripper,
     move_hand_to_relative_pose,
@@ -33,6 +34,7 @@ from spot_skills.arm_utils import (
 )
 from spot_skills.detection_utils import DetectionCandidate, Detector
 from spot_skills.primitives import execute_recovery_action
+from spot_skills.walk_to_utils import walk_to_pixel
 
 g_image_click = None
 g_image_display = None
@@ -143,6 +145,89 @@ def object_place(spot, semantic_class="bag", position=None, should_stop=lambda: 
     return True
 
 
+def _capture_candidates(
+    spot, detector, image_source, semantic_class, user_input, debug
+):
+    """Take images from every camera and look for the object.
+
+    Returns (detection_index, candidates). candidates is None only if no image
+    could be captured at all; detection_index is None when images exist but
+    the object was not found in any of them.
+    """
+    attempts = 0
+    candidates = None
+    detection_index = None
+    while attempts < 2:
+        attempts += 1
+
+        if not user_input:
+            # Try to get the centroid using the detector passed into the function.
+            detection_index, candidates = detector.return_centroid(
+                image_source, semantic_class, debug=debug
+            )
+
+            # If the detector fails to return the centroid, then try again until max_attempts
+            if detection_index is not None:
+                break
+
+        else:
+            image, img = spot.get_image_RGB(view=image_source)
+            xy = get_user_grasp_input(spot, img)
+            candidates = [DetectionCandidate(image, img, xy, image_source)]
+            detection_index = 0
+            print("Found object centroid:", xy)
+            break
+
+    return detection_index, candidates
+
+
+def _as_decision(result) -> ApprovalDecision:
+    """Accept the legacy (approved, xy, image_index) tuple from older feedback objects."""
+    if isinstance(result, ApprovalDecision):
+        return result
+    approved, xy, image_index = result
+    if approved is not None and not approved:
+        return ApprovalDecision.reject()
+    return ApprovalDecision.approve((xy[0], xy[1]), image_index)
+
+
+def _ask_operator(feedback, candidates, detection_index, semantic_class):
+    """Show every candidate image in the approval panel and wait for the answer."""
+    cv2_images = [copy(c.cv2_image) for c in candidates]
+    source_names = [c.source_name for c in candidates]
+
+    if detection_index is not None:
+        xy = candidates[detection_index].detection_xy
+        det_x = xy[0] if xy else None
+        det_y = xy[1] if xy else None
+    else:
+        det_x = None
+        det_y = None
+
+    return _as_decision(
+        feedback.bounding_box_detection_feedback(
+            cv2_images,
+            source_names,
+            detection_index,
+            det_x,
+            det_y,
+            semantic_class,
+        )
+    )
+
+
+def _look_around(spot):
+    """Nudge the heading so the next capture sees something different."""
+    execute_recovery_action(
+        spot,
+        recover_arm=False,
+        relative_pose=math_helpers.SE2Pose(
+            x=0.0, y=0.0, angle=np.random.choice([-0.5, 0.5])
+        ),
+    )
+    time.sleep(1)
+
+
 def object_grasp(
     spot,
     detector,
@@ -154,8 +239,16 @@ def object_grasp(
     feedback=None,
     carry_high=True,
     should_stop=lambda: False,
+    walk_to_standoff=1.0,
 ):
-    """Pick an object. should_stop() aborts the grasp; the robot then stays put."""
+    """Pick an object. should_stop() aborts the grasp; the robot then stays put.
+
+    With a feedback object the operator reviews the detection first and may
+    answer "walk to": the robot then walks toward the clicked ground/object
+    point (stopping `walk_to_standoff` meters short unless the operator chose a
+    stand point), captures new images and asks again. This repeats until the
+    operator approves or rejects, all within one grasp attempt.
+    """
     debug_images = []
 
     """Using the Boston Dynamics API to command Spot's arm"""
@@ -169,94 +262,66 @@ def object_grasp(
     robot_state_client = spot.state_client
     manipulation_api_client = spot.manipulation_api_client
 
-    attempts = 0
-    success = False
-
     # Set up the detector (e.g., for YOLOWorld, this may mean updating recognized classes)
     detector.set_up_detector(semantic_class)
 
-    candidates = None
-    while attempts < 2 and not success:
-        attempts += 1
+    while True:
+        detection_index, candidates = _capture_candidates(
+            spot, detector, image_source, semantic_class, user_input, debug
+        )
 
-        if not user_input:
-            # Try to get the centroid using the detector passed into the function.
-            detection_index, candidates = detector.return_centroid(
-                image_source, semantic_class, debug=debug
-            )
+        if candidates is None:
+            if feedback is not None:
+                feedback.print(
+                    "INFO",
+                    "Failed to capture any camera images. Please check the detector or user input.",
+                )
+            _look_around(spot)
+            return False
 
-            # If the detector fails to return the centroid, then try again until max_attempts
+        if feedback is None:
             if detection_index is None:
-                continue
+                _look_around(spot)
+                return False
+            image = candidates[detection_index].bosdyn_image
+            xy = candidates[detection_index].detection_xy
+            break
 
-            else:
-                success = True
+        # Display all candidate images in the approval panel
+        decision = _ask_operator(feedback, candidates, detection_index, semantic_class)
 
-        else:
-            image, img = spot.get_image_RGB(view=image_source)
-            xy = get_user_grasp_input(spot, img)
-            candidates = [DetectionCandidate(image, img, xy, image_source)]
-            detection_index = 0
-            print("Found object centroid:", xy)
-
-    if candidates is None:
-        if feedback is not None:
+        if decision.walk_to:
+            if should_stop():
+                return False
             feedback.print(
                 "INFO",
-                "Failed to capture any camera images. Please check the detector or user input.",
+                f"User requested walk-to pixel {decision.pixel} in image "
+                f"{decision.image_index} ({candidates[decision.image_index].source_name}).",
             )
-        execute_recovery_action(
-            spot,
-            recover_arm=False,
-            relative_pose=math_helpers.SE2Pose(
-                x=0.0, y=0.0, angle=np.random.choice([-0.5, 0.5])
-            ),
-        )
-        time.sleep(1)
-        return False
+            stow_arm(spot)
+            walk_to_pixel(
+                spot,
+                candidates[decision.image_index].bosdyn_image,
+                decision.pixel,
+                stand_pixel=decision.stand_pixel,
+                standoff=walk_to_standoff,
+                feedback=feedback,
+                should_stop=should_stop,
+            )
+            if should_stop():
+                return False
+            # Whether or not the walk finished, look again from where the
+            # robot now stands and let the operator decide afresh.
+            continue
 
-    # Display all candidate images in the approval panel
-    if feedback is not None:
-        cv2_images = [copy(c.cv2_image) for c in candidates]
-        source_names = [c.source_name for c in candidates]
-
-        if detection_index is not None:
-            xy = candidates[detection_index].detection_xy
-            det_x = xy[0] if xy else None
-            det_y = xy[1] if xy else None
-        else:
-            det_x = None
-            det_y = None
-
-        approved, updated_xy, selected_index = feedback.bounding_box_detection_feedback(
-            cv2_images,
-            source_names,
-            detection_index,
-            det_x,
-            det_y,
-            semantic_class,
-        )
-
-        if approved is not None and not approved:
+        if not decision.approved:
             feedback.print("INFO", "User requested abort.")
             return False
 
         # Use selected camera image and pixel (panel always sends the correct selection)
-        image = candidates[selected_index].bosdyn_image
-        xy = updated_xy
-    else:
-        if detection_index is None:
-            execute_recovery_action(
-                spot,
-                recover_arm=False,
-                relative_pose=math_helpers.SE2Pose(
-                    x=0.0, y=0.0, angle=np.random.choice([-0.5, 0.5])
-                ),
-            )
-            time.sleep(1)
-            return False
-        image = candidates[detection_index].bosdyn_image
-        xy = candidates[detection_index].detection_xy
+        image = candidates[decision.image_index].bosdyn_image
+        xy = decision.pixel
+        break
 
     pick_vec = geometry_pb2.Vec2(x=xy[0], y=xy[1])
     stow_arm(spot)

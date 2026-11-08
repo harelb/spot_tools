@@ -140,10 +140,14 @@ class SpotExecutor:
         goal_tolerance=2.8,
         feedback=None,
         use_fake_path_planner=False,
+        walk_to_standoff=1.0,
     ):
         self.debug = False
         self.spot_interface = spot_interface
         self.transform_lookup = transform_lookup
+        # How far short of an operator's walk-to point the robot stops before
+        # re-detecting, when the operator did not choose a stand point.
+        self.walk_to_standoff = walk_to_standoff
         self.follower_lookahead = follower_lookahead
         self.goal_tolerance = goal_tolerance
         self.detector = detector
@@ -354,6 +358,7 @@ class SpotExecutor:
             semantic_class=command.object_class,
             feedback=feedback,
             should_stop=self.interrupted,
+            walk_to_standoff=self.walk_to_standoff,
         )
 
         if self.debug:
