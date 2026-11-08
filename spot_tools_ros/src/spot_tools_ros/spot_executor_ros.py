@@ -25,11 +25,12 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile
 from robot_executor_interface_ros.action_descriptions_ros import from_msg
 from robot_executor_msgs.msg import ActionDoneMsg, ActionMsg, ActionSequenceMsg
 from ros_system_monitor_msgs.msg import NodeInfoMsg
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from shapely.geometry import Point
 from spot_executor.fake_spot import FakeSpot
 from spot_executor.spot import Spot
 from spot_skills.approval import ApprovalDecision
+from spot_skills.depth_utils import encode_depth_png, encode_jpeg
 from spot_skills.detection_utils import YOLODetector
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
@@ -133,6 +134,44 @@ class RosFeedbackCollector:
             # Add the handler to the logger
             self.file_logger.addHandler(file_handler)
 
+    # object_grasp passes depth registered to each candidate camera when set.
+    supports_depth = True
+    # JPEG candidates + PNG depth (default), or the legacy raw images that the
+    # RViz panel reads. Set from the executor parameter
+    # compress_manipulation_requests.
+    compress_manipulation_requests = True
+
+    def _manipulation_request(self, detection_imgs, depth_images):
+        request_msg = ManipulationApprovalRequest()
+        if not self.compress_manipulation_requests:
+            bridge = CvBridge()
+            request_msg.images = [
+                bridge.cv2_to_imgmsg(img, encoding="passthrough")
+                for img in detection_imgs
+            ]
+            return request_msg
+
+        # The arrays are handed over in the same channel order the raw
+        # transport labelled 8UC3, which viewers treat as BGR. cv2 encodes BGR,
+        # so the JPEG looks exactly like the raw image did.
+        request_msg.compressed_images = [
+            CompressedImage(format="jpeg", data=encode_jpeg(img))
+            for img in detection_imgs
+        ]
+        depth_images = list(depth_images or [])
+        depth_images += [None] * (len(detection_imgs) - len(depth_images))
+        for entry in depth_images[: len(detection_imgs)]:
+            if entry is None:
+                request_msg.depth_images.append(CompressedImage())
+                request_msg.depth_scales.append(0.0)
+                continue
+            depth, scale = entry
+            request_msg.depth_images.append(
+                CompressedImage(format="png", data=encode_depth_png(depth))
+            )
+            request_msg.depth_scales.append(float(scale))
+        return request_msg
+
     def bounding_box_detection_feedback(
         self,
         detection_imgs,
@@ -141,13 +180,9 @@ class RosFeedbackCollector:
         centroid_x,
         centroid_y,
         semantic_class,
+        depth_images=None,
     ):
-        bridge = CvBridge()
-
-        request_msg = ManipulationApprovalRequest()
-        request_msg.images = [
-            bridge.cv2_to_imgmsg(img, encoding="passthrough") for img in detection_imgs
-        ]
+        request_msg = self._manipulation_request(detection_imgs, depth_images)
         request_msg.image_source_names = source_names
         request_msg.has_detection = detection_index is not None
         request_msg.detection_image_index = (
@@ -516,6 +551,12 @@ class SpotExecutorRos(Node):
         # re-detect, when no explicit stand point was chosen.
         self.declare_parameter("pick_walk_to_standoff", 1.0)
         pick_walk_to_standoff = self.get_parameter("pick_walk_to_standoff").value
+        # JPEG + registered depth in manipulation requests (web console), or the
+        # legacy raw images the RViz approval panel expects.
+        self.declare_parameter("compress_manipulation_requests", True)
+        compress_manipulation_requests = self.get_parameter(
+            "compress_manipulation_requests"
+        ).value
         # semantic_model_path = self.get_parameter("semantic_model_path").value
         # labelspace_path = self.get_parameter("labelspace_path").value
         # semantic_name_to_id = load_inverse_semantic_id_map_from_label_space(
@@ -550,6 +591,9 @@ class SpotExecutorRos(Node):
 
         self.feedback_collector = RosFeedbackCollector(
             self.odom_frame, output_dir, log_to_file
+        )
+        self.feedback_collector.compress_manipulation_requests = bool(
+            compress_manipulation_requests
         )
         self.feedback_collector.register_publishers(self)
 

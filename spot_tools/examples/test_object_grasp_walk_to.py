@@ -249,3 +249,28 @@ def test_legacy_tuple_feedback_still_works(patched):
 
     assert grasp_utils.object_grasp(spot, detector, feedback=LegacyFeedback([])) is True
     sys.modules["bosdyn.api.geometry_pb2"].Vec2.assert_called_with(x=3, y=4)
+
+
+def test_depth_is_captured_for_feedback_that_supports_it(patched, monkeypatch):
+    spot = fake_spot()
+    detector = ScriptedDetector()
+    depth = object()
+    calls = []
+
+    def capture(spot_arg, sources, log=print):
+        calls.append(list(sources))
+        return [depth, None]
+
+    monkeypatch.setattr(grasp_utils, "capture_aligned_depth", capture)
+
+    class DepthFeedback(ScriptedFeedback):
+        supports_depth = True
+
+        def bounding_box_detection_feedback(self, *args, depth_images=None):
+            self.depth_seen = depth_images
+            return ApprovalDecision.reject()
+
+    feedback = DepthFeedback([])
+    assert grasp_utils.object_grasp(spot, detector, feedback=feedback) is False
+    assert calls == [["hand_color_image", "frontright_fisheye_image"]]
+    assert feedback.depth_seen == [depth, None]

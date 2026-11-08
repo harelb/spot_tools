@@ -20,6 +20,9 @@
         # far short of the clicked point (meters) before re-detecting, unless the
         # operator chose an explicit stand point.
         pick_walk_to_standoff: 1.0
+        # manipulation approval requests: JPEG candidates + registered depth (true,
+        # read by the web console) or legacy raw images (false, read by RViz).
+        compress_manipulation_requests: true
         # mid-level planner
         mid_level_planner_type: "astar"   # "astar" or "identity"
         lookahead_distance: 50            # grid cells

@@ -32,6 +32,7 @@ from spot_skills.arm_utils import (
     open_gripper,
     stow_arm,
 )
+from spot_skills.depth_utils import capture_aligned_depth
 from spot_skills.detection_utils import DetectionCandidate, Detector
 from spot_skills.primitives import execute_recovery_action
 from spot_skills.walk_to_utils import walk_to_pixel
@@ -191,8 +192,12 @@ def _as_decision(result) -> ApprovalDecision:
     return ApprovalDecision.approve((xy[0], xy[1]), image_index)
 
 
-def _ask_operator(feedback, candidates, detection_index, semantic_class):
-    """Show every candidate image in the approval panel and wait for the answer."""
+def _ask_operator(spot, feedback, candidates, detection_index, semantic_class):
+    """Show every candidate image in the approval panel and wait for the answer.
+
+    Feedback objects that declare `supports_depth` also get the depth image
+    registered to each candidate camera, so the operator can see distances.
+    """
     cv2_images = [copy(c.cv2_image) for c in candidates]
     source_names = [c.source_name for c in candidates]
 
@@ -204,16 +209,15 @@ def _ask_operator(feedback, candidates, detection_index, semantic_class):
         det_x = None
         det_y = None
 
-    return _as_decision(
-        feedback.bounding_box_detection_feedback(
-            cv2_images,
-            source_names,
-            detection_index,
-            det_x,
-            det_y,
-            semantic_class,
+    args = (cv2_images, source_names, detection_index, det_x, det_y, semantic_class)
+    if getattr(feedback, "supports_depth", False):
+        depth = capture_aligned_depth(
+            spot, source_names, log=lambda m: feedback.print("WARNING", m)
         )
-    )
+        return _as_decision(
+            feedback.bounding_box_detection_feedback(*args, depth_images=depth)
+        )
+    return _as_decision(feedback.bounding_box_detection_feedback(*args))
 
 
 def _look_around(spot):
@@ -288,7 +292,9 @@ def object_grasp(
             break
 
         # Display all candidate images in the approval panel
-        decision = _ask_operator(feedback, candidates, detection_index, semantic_class)
+        decision = _ask_operator(
+            spot, feedback, candidates, detection_index, semantic_class
+        )
 
         if decision.walk_to:
             if should_stop():
