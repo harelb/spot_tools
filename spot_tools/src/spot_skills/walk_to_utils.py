@@ -156,7 +156,7 @@ def walk_to_pixel(
     image_response,
     pixel,
     stand_pixel=None,
-    standoff: float = 1.0,
+    standoff: float = 1.5,
     timeout: float = 25.0,
     feedback=None,
     should_stop=lambda: False,

@@ -140,7 +140,7 @@ class SpotExecutor:
         goal_tolerance=2.8,
         feedback=None,
         use_fake_path_planner=False,
-        walk_to_standoff=1.0,
+        walk_to_standoff=1.5,
         walk_to_max_distance=5.0,
     ):
         self.debug = False

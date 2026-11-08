@@ -198,7 +198,7 @@ def _ask_operator(
     candidates,
     detection_index,
     semantic_class,
-    walk_to_standoff=1.0,
+    walk_to_standoff=1.5,
     walk_to_max_distance=5.0,
 ):
     """Show every candidate image in the approval panel and wait for the answer.
@@ -253,7 +253,7 @@ def object_grasp(
     feedback=None,
     carry_high=True,
     should_stop=lambda: False,
-    walk_to_standoff=1.0,
+    walk_to_standoff=1.5,
     walk_to_max_distance=5.0,
 ):
     """Pick an object. should_stop() aborts the grasp; the robot then stays put.

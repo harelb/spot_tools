@@ -573,7 +573,7 @@ class SpotExecutorRos(Node):
         detector_model_path = self.get_parameter("detector_model_path").value
         # Distance short of an operator's walk-to point at which Spot stops to
         # re-detect, when no explicit stand point was chosen.
-        self.declare_parameter("pick_walk_to_standoff", 1.0)
+        self.declare_parameter("pick_walk_to_standoff", 1.5)
         pick_walk_to_standoff = self.get_parameter("pick_walk_to_standoff").value
         # JPEG + registered depth in manipulation requests (web console), or the
         # legacy raw images the RViz approval panel expects.

@@ -120,7 +120,7 @@ arrives on `~/pick_confirmation`. The response has three outcomes:
 Walk-to lifts the pixel onto Spot's ground plane estimate using the image's pinhole
 model and transform snapshot (`spot_skills/walk_to_utils.py`), then drives to a
 standoff pose facing that point. The standoff distance is the executor parameter
-`pick_walk_to_standoff` (default `1.0` m). If the response carries a stand point
+`pick_walk_to_standoff` (default `1.5` m, from the body center; Spot's front is ~0.55 m ahead of center). If the response carries a stand point
 (`has_stand_point`, `stand_x`, `stand_y`), the robot stands on that ground pixel
 instead and faces the target from there, which gives the operator heading control;
 the operator UIs keep that option behind a flag that is off by default. The
