@@ -141,6 +141,7 @@ class SpotExecutor:
         feedback=None,
         use_fake_path_planner=False,
         walk_to_standoff=1.0,
+        walk_to_max_distance=5.0,
     ):
         self.debug = False
         self.spot_interface = spot_interface
@@ -148,6 +149,8 @@ class SpotExecutor:
         # How far short of an operator's walk-to point the robot stops before
         # re-detecting, when the operator did not choose a stand point.
         self.walk_to_standoff = walk_to_standoff
+        # Longest single walk-to move; far targets are approached in steps.
+        self.walk_to_max_distance = walk_to_max_distance
         self.follower_lookahead = follower_lookahead
         self.goal_tolerance = goal_tolerance
         self.detector = detector
@@ -359,6 +362,7 @@ class SpotExecutor:
             feedback=feedback,
             should_stop=self.interrupted,
             walk_to_standoff=self.walk_to_standoff,
+            walk_to_max_distance=self.walk_to_max_distance,
         )
 
         if self.debug:

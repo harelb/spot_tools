@@ -25,7 +25,7 @@ from spot_skills.walk_to_geometry import (
     heading_error,
     intersect_ray_plane,
     pixel_ray,
-    standoff_pose,
+    plan_walk,
 )
 
 # How close counts as "arrived" when the trajectory feedback is not conclusive.
@@ -160,13 +160,16 @@ def walk_to_pixel(
     timeout: float = 25.0,
     feedback=None,
     should_stop=lambda: False,
+    max_distance: float = 5.0,
 ) -> bool:
     """Walk to a standoff pose for the ground/object point under `pixel`.
 
     `stand_pixel`, when given, chooses where to stand (and hence the heading)
     instead of the default "stop `standoff` meters short, facing the target".
-    Returns True once the robot is at the pose. The caller should re-detect
-    afterwards; this function never grasps.
+    No single walk translates more than `max_distance` meters: the ground-plane
+    estimate grows unreliable for far, shallow rays, so a far target is
+    approached in steps. Returns True once the robot is at the pose. The caller
+    should re-detect afterwards; this function never grasps.
     """
     if spot.is_fake:
         # No camera model on the fake robot: pretend the click was 2 m ahead.
@@ -175,7 +178,9 @@ def walk_to_pixel(
         stand = None
         if stand_pixel is not None:
             stand = target + np.array([-np.sin(yaw), np.cos(yaw)]) * standoff
-        gx, gy, gyaw = standoff_pose(target, (x, y), standoff, stand_xy=stand)
+        gx, gy, gyaw, _ = plan_walk(
+            target, (x, y), standoff, stand_xy=stand, max_distance=max_distance
+        )
         _log(feedback, f"[fake] Walking to ({gx:.2f}, {gy:.2f}, yaw {gyaw:.2f})")
         return _drive_to(
             spot, math_helpers.SE2Pose(gx, gy, gyaw), timeout, feedback, should_stop
@@ -202,7 +207,9 @@ def walk_to_pixel(
 
     rx, ry, _ = robot_xy_yaw_in_vision(robot_state)
     try:
-        gx, gy, gyaw = standoff_pose(target, (rx, ry), standoff, stand_xy=stand)
+        gx, gy, gyaw, capped = plan_walk(
+            target, (rx, ry), standoff, stand_xy=stand, max_distance=max_distance
+        )
     except ValueError as ex:
         _log(feedback, f"Walk-to goal invalid: {ex}")
         return False
@@ -210,7 +217,10 @@ def walk_to_pixel(
     _log(
         feedback,
         f"Walk-to target ({target[0]:.2f}, {target[1]:.2f}, {target[2]:.2f}) vision; "
-        f"standing at ({gx:.2f}, {gy:.2f}) heading {np.degrees(gyaw):.0f} deg",
+        f"standing at ({gx:.2f}, {gy:.2f}) heading {np.degrees(gyaw):.0f} deg; "
+        f"ground-plane distance {np.hypot(target[0] - rx, target[1] - ry):.2f} m, "
+        f"walking {np.hypot(gx - rx, gy - ry):.2f} m"
+        + (f" (capped at {max_distance:.1f} m)" if capped else ""),
     )
     walk_feedback = getattr(feedback, "walk_to_feedback", None)
     if walk_feedback is not None:
@@ -219,3 +229,52 @@ def walk_to_pixel(
     return _drive_to(
         spot, math_helpers.SE2Pose(gx, gy, gyaw), timeout, feedback, should_stop
     )
+
+
+def walk_preview_geometry(spot, image_responses):
+    """Geometry a viewer needs to reproduce pixel_to_ground_point and plan_walk.
+
+    Returns a dict with, per image, ``cameras[i] = (fx, fy, cx, cy, x, y, z, qw,
+    qx, qy, qz)`` (sensor pose in the vision frame) or None, plus ``ground``
+    (point, normal) and ``robot`` (x, y, yaw), each None when unavailable. Never
+    raises: a missing preview must not block the pick.
+    """
+    preview = {"cameras": [None] * len(image_responses), "ground": None, "robot": None}
+    if getattr(spot, "is_fake", False):
+        return preview
+    for index, response in enumerate(image_responses):
+        try:
+            source, shot = response.source, response.shot
+            if not source.HasField("pinhole") or not shot.frame_name_image_sensor:
+                continue
+            k = source.pinhole.intrinsics
+            pose = get_a_tform_b(
+                shot.transforms_snapshot,
+                VISION_FRAME_NAME,
+                shot.frame_name_image_sensor,
+            )
+            if pose is None or k.focal_length.x <= 0 or k.focal_length.y <= 0:
+                continue
+            preview["cameras"][index] = (
+                k.focal_length.x,
+                k.focal_length.y,
+                k.principal_point.x,
+                k.principal_point.y,
+                pose.x,
+                pose.y,
+                pose.z,
+                pose.rot.w,
+                pose.rot.x,
+                pose.rot.y,
+                pose.rot.z,
+            )
+        except Exception:
+            continue
+    try:
+        state = spot.get_state()
+        point, normal = ground_plane_in_vision(state)
+        preview["ground"] = (tuple(map(float, point)), tuple(map(float, normal)))
+        preview["robot"] = tuple(map(float, robot_xy_yaw_in_vision(state)))
+    except Exception:
+        pass
+    return preview

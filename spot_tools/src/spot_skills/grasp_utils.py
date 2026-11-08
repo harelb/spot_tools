@@ -35,7 +35,7 @@ from spot_skills.arm_utils import (
 from spot_skills.depth_utils import capture_aligned_depth
 from spot_skills.detection_utils import DetectionCandidate, Detector
 from spot_skills.primitives import execute_recovery_action
-from spot_skills.walk_to_utils import walk_to_pixel
+from spot_skills.walk_to_utils import walk_preview_geometry, walk_to_pixel
 
 g_image_click = None
 g_image_display = None
@@ -192,7 +192,15 @@ def _as_decision(result) -> ApprovalDecision:
     return ApprovalDecision.approve((xy[0], xy[1]), image_index)
 
 
-def _ask_operator(spot, feedback, candidates, detection_index, semantic_class):
+def _ask_operator(
+    spot,
+    feedback,
+    candidates,
+    detection_index,
+    semantic_class,
+    walk_to_standoff=1.0,
+    walk_to_max_distance=5.0,
+):
     """Show every candidate image in the approval panel and wait for the answer.
 
     Feedback objects that declare `supports_depth` also get the depth image
@@ -210,14 +218,16 @@ def _ask_operator(spot, feedback, candidates, detection_index, semantic_class):
         det_y = None
 
     args = (cv2_images, source_names, detection_index, det_x, det_y, semantic_class)
+    extras = {}
     if getattr(feedback, "supports_depth", False):
-        depth = capture_aligned_depth(
+        extras["depth_images"] = capture_aligned_depth(
             spot, source_names, log=lambda m: feedback.print("WARNING", m)
         )
-        return _as_decision(
-            feedback.bounding_box_detection_feedback(*args, depth_images=depth)
-        )
-    return _as_decision(feedback.bounding_box_detection_feedback(*args))
+    if getattr(feedback, "supports_walk_preview", False):
+        preview = walk_preview_geometry(spot, [c.bosdyn_image for c in candidates])
+        preview.update(standoff=walk_to_standoff, max_distance=walk_to_max_distance)
+        extras["walk_preview"] = preview
+    return _as_decision(feedback.bounding_box_detection_feedback(*args, **extras))
 
 
 def _look_around(spot):
@@ -244,6 +254,7 @@ def object_grasp(
     carry_high=True,
     should_stop=lambda: False,
     walk_to_standoff=1.0,
+    walk_to_max_distance=5.0,
 ):
     """Pick an object. should_stop() aborts the grasp; the robot then stays put.
 
@@ -293,7 +304,13 @@ def object_grasp(
 
         # Display all candidate images in the approval panel
         decision = _ask_operator(
-            spot, feedback, candidates, detection_index, semantic_class
+            spot,
+            feedback,
+            candidates,
+            detection_index,
+            semantic_class,
+            walk_to_standoff,
+            walk_to_max_distance,
         )
 
         if decision.walk_to:
@@ -313,6 +330,7 @@ def object_grasp(
                 standoff=walk_to_standoff,
                 feedback=feedback,
                 should_stop=should_stop,
+                max_distance=walk_to_max_distance,
             )
             if should_stop():
                 return False

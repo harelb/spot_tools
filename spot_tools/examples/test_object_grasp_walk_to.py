@@ -157,6 +157,7 @@ def patched(monkeypatch):
 
     def walk_to_pixel(spot, image, pixel, stand_pixel=None, standoff=1.0, **kwargs):
         calls["walk"].append((image, pixel, stand_pixel, standoff))
+        calls.setdefault("max_distance", []).append(kwargs.get("max_distance"))
         return True
 
     monkeypatch.setattr(grasp_utils, "walk_to_pixel", walk_to_pixel)
@@ -274,3 +275,45 @@ def test_depth_is_captured_for_feedback_that_supports_it(patched, monkeypatch):
     assert grasp_utils.object_grasp(spot, detector, feedback=feedback) is False
     assert calls == [["hand_color_image", "frontright_fisheye_image"]]
     assert feedback.depth_seen == [depth, None]
+
+
+def test_walk_cap_and_preview_reach_their_consumers(patched, monkeypatch):
+    spot = fake_spot()
+    detector = ScriptedDetector()
+    seen = {}
+    monkeypatch.setattr(
+        grasp_utils, "capture_aligned_depth", lambda *a, **k: [None, None]
+    )
+    monkeypatch.setattr(
+        grasp_utils,
+        "walk_preview_geometry",
+        lambda spot_arg, images: {
+            "cameras": [None] * len(images),
+            "ground": None,
+            "robot": None,
+        },
+    )
+
+    class PreviewFeedback(ScriptedFeedback):
+        supports_depth = True
+        supports_walk_preview = True
+
+        def bounding_box_detection_feedback(
+            self, *args, depth_images=None, walk_preview=None
+        ):
+            seen.setdefault("previews", []).append(walk_preview)
+            return self.decisions.pop(0)
+
+    feedback = PreviewFeedback(
+        [ApprovalDecision.walk((1, 2), 0), ApprovalDecision.reject()]
+    )
+    grasp_utils.object_grasp(
+        spot,
+        detector,
+        feedback=feedback,
+        walk_to_standoff=0.7,
+        walk_to_max_distance=3.0,
+    )
+    assert patched["max_distance"] == [3.0]
+    assert [p["standoff"] for p in seen["previews"]] == [0.7, 0.7]
+    assert all(p["max_distance"] == 3.0 for p in seen["previews"])

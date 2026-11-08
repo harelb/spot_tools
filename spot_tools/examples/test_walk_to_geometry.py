@@ -67,3 +67,22 @@ def test_decision_kinds_are_exclusive():
     assert walk.walk_to and not walk.approved and not walk.rejected
     assert walk.stand_pixel == (3, 4)
     assert ApprovalDecision.reject().rejected
+
+
+def test_far_targets_are_capped_and_flagged():
+    from spot_skills.walk_to_geometry import plan_walk
+
+    # 9 m target, 1 m standoff -> an 8 m move, capped to 5 m along the same line.
+    x, y, yaw, capped = plan_walk((9.0, 0.0), (0.0, 0.0), 1.0, max_distance=5.0)
+    assert capped and np.isclose(x, 5.0) and np.isclose(y, 0.0) and np.isclose(yaw, 0.0)
+    # Exactly at the cap is not capped.
+    x, y, yaw, capped = plan_walk((6.0, 0.0), (0.0, 0.0), 1.0, max_distance=5.0)
+    assert not capped and np.isclose(x, 5.0)
+    # A far stand point is capped too, and the robot still faces the target.
+    x, y, yaw, capped = plan_walk(
+        (8.0, 4.0), (0.0, 0.0), 1.0, stand_xy=(8.0, 0.0), max_distance=5.0
+    )
+    assert capped and np.isclose(x, 5.0) and np.isclose(y, 0.0)
+    assert np.isclose(yaw, np.arctan2(4.0, 3.0))
+    # No cap configured behaves as before.
+    assert plan_walk((9.0, 0.0), (0.0, 0.0), 1.0)[:2] == (8.0, 0.0)

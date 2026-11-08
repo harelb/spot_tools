@@ -136,6 +136,8 @@ class RosFeedbackCollector:
 
     # object_grasp passes depth registered to each candidate camera when set.
     supports_depth = True
+    # ...and the camera/ground geometry behind the walk-to estimate.
+    supports_walk_preview = True
     # JPEG candidates + PNG depth (default), or the legacy raw images that the
     # RViz panel reads. Set from the executor parameter
     # compress_manipulation_requests.
@@ -172,6 +174,26 @@ class RosFeedbackCollector:
             request_msg.depth_scales.append(float(scale))
         return request_msg
 
+    @staticmethod
+    def _add_walk_preview(request_msg, count, preview):
+        """Copy walk_preview_geometry() into the flat request arrays."""
+        if not preview:
+            return
+        cameras = list(preview.get("cameras") or [])
+        cameras += [None] * (count - len(cameras))
+        for camera in cameras[:count]:
+            values = [0.0] * 11 if camera is None else [float(v) for v in camera]
+            request_msg.camera_intrinsics.extend(values[:4])
+            request_msg.camera_poses.extend(values[4:])
+        ground = preview.get("ground")
+        if ground is not None:
+            request_msg.ground_plane = [float(v) for v in (*ground[0], *ground[1])]
+        robot = preview.get("robot")
+        if robot is not None:
+            request_msg.robot_pose = [float(v) for v in robot]
+        request_msg.walk_to_standoff = float(preview.get("standoff", 0.0))
+        request_msg.walk_to_max_distance = float(preview.get("max_distance", 0.0))
+
     def bounding_box_detection_feedback(
         self,
         detection_imgs,
@@ -181,8 +203,10 @@ class RosFeedbackCollector:
         centroid_y,
         semantic_class,
         depth_images=None,
+        walk_preview=None,
     ):
         request_msg = self._manipulation_request(detection_imgs, depth_images)
+        self._add_walk_preview(request_msg, len(detection_imgs), walk_preview)
         request_msg.image_source_names = source_names
         request_msg.has_detection = detection_index is not None
         request_msg.detection_image_index = (
@@ -553,6 +577,12 @@ class SpotExecutorRos(Node):
         pick_walk_to_standoff = self.get_parameter("pick_walk_to_standoff").value
         # JPEG + registered depth in manipulation requests (web console), or the
         # legacy raw images the RViz approval panel expects.
+        # Longest single walk-to move (m); the ground-plane estimate is
+        # unreliable for far targets, so they are approached in steps.
+        self.declare_parameter("pick_walk_to_max_distance", 5.0)
+        pick_walk_to_max_distance = self.get_parameter(
+            "pick_walk_to_max_distance"
+        ).value
         self.declare_parameter("compress_manipulation_requests", True)
         compress_manipulation_requests = self.get_parameter(
             "compress_manipulation_requests"
@@ -742,6 +772,7 @@ class SpotExecutorRos(Node):
             self.feedback_collector,
             use_fake_path_plan,
             walk_to_standoff=pick_walk_to_standoff,
+            walk_to_max_distance=pick_walk_to_max_distance,
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
