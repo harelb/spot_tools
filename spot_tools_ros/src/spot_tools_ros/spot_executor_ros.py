@@ -34,11 +34,13 @@ from robot_executor_msgs.msg import (
     RuntimeGuardsMsg,
 )
 from ros_system_monitor_msgs.msg import NodeInfoMsg
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from shapely.geometry import Point
 from spot_executor.fake_spot import FakeSpot
 from spot_executor.spot import Spot
 from spot_executor.teleop import HARD_MAX, TeleopController
+from spot_skills.approval import ApprovalDecision
+from spot_skills.depth_utils import encode_depth_png, encode_jpeg
 from spot_skills.detection_utils import YOLODetector
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
@@ -130,6 +132,8 @@ class RosFeedbackCollector:
         self.pick_confirmation_approved = False
         self.pick_confirmation_xy = [0, 0]
         self.pick_confirmation_image_index = 0
+        self.pick_confirmation_walk_to = False
+        self.pick_confirmation_stand_xy = None
 
         self.break_out_of_waiting_loop = False
         self.plan_valid = True
@@ -189,6 +193,66 @@ class RosFeedbackCollector:
             self.target_color = shade(robot_color, 0.55)
             self.subgoal_color = shade(robot_color, 0.3)
 
+    # object_grasp passes depth registered to each candidate camera when set.
+    supports_depth = True
+    # ...and the camera/ground geometry behind the walk-to estimate.
+    supports_walk_preview = True
+    # JPEG candidates + PNG depth (default), or the legacy raw images that the
+    # RViz panel reads. Set from the executor parameter
+    # compress_manipulation_requests.
+    compress_manipulation_requests = True
+
+    def _manipulation_request(self, detection_imgs, depth_images):
+        request_msg = ManipulationApprovalRequest()
+        if not self.compress_manipulation_requests:
+            bridge = CvBridge()
+            request_msg.images = [
+                bridge.cv2_to_imgmsg(img, encoding="passthrough")
+                for img in detection_imgs
+            ]
+            return request_msg
+
+        # The arrays are handed over in the same channel order the raw
+        # transport labelled 8UC3, which viewers treat as BGR. cv2 encodes BGR,
+        # so the JPEG looks exactly like the raw image did.
+        request_msg.compressed_images = [
+            CompressedImage(format="jpeg", data=encode_jpeg(img))
+            for img in detection_imgs
+        ]
+        depth_images = list(depth_images or [])
+        depth_images += [None] * (len(detection_imgs) - len(depth_images))
+        for entry in depth_images[: len(detection_imgs)]:
+            if entry is None:
+                request_msg.depth_images.append(CompressedImage())
+                request_msg.depth_scales.append(0.0)
+                continue
+            depth, scale = entry
+            request_msg.depth_images.append(
+                CompressedImage(format="png", data=encode_depth_png(depth))
+            )
+            request_msg.depth_scales.append(float(scale))
+        return request_msg
+
+    @staticmethod
+    def _add_walk_preview(request_msg, count, preview):
+        """Copy walk_preview_geometry() into the flat request arrays."""
+        if not preview:
+            return
+        cameras = list(preview.get("cameras") or [])
+        cameras += [None] * (count - len(cameras))
+        for camera in cameras[:count]:
+            values = [0.0] * 11 if camera is None else [float(v) for v in camera]
+            request_msg.camera_intrinsics.extend(values[:4])
+            request_msg.camera_poses.extend(values[4:])
+        ground = preview.get("ground")
+        if ground is not None:
+            request_msg.ground_plane = [float(v) for v in (*ground[0], *ground[1])]
+        robot = preview.get("robot")
+        if robot is not None:
+            request_msg.robot_pose = [float(v) for v in robot]
+        request_msg.walk_to_standoff = float(preview.get("standoff", 0.0))
+        request_msg.walk_to_max_distance = float(preview.get("max_distance", 0.0))
+
     def bounding_box_detection_feedback(
         self,
         detection_imgs,
@@ -197,13 +261,11 @@ class RosFeedbackCollector:
         centroid_x,
         centroid_y,
         semantic_class,
+        depth_images=None,
+        walk_preview=None,
     ):
-        bridge = CvBridge()
-
-        request_msg = ManipulationApprovalRequest()
-        request_msg.images = [
-            bridge.cv2_to_imgmsg(img, encoding="passthrough") for img in detection_imgs
-        ]
+        request_msg = self._manipulation_request(detection_imgs, depth_images)
+        self._add_walk_preview(request_msg, len(detection_imgs), walk_preview)
         request_msg.image_source_names = source_names
         request_msg.has_detection = detection_index is not None
         request_msg.detection_image_index = (
@@ -225,17 +287,24 @@ class RosFeedbackCollector:
 
         if self.break_out_of_waiting_loop:
             self.logger.info("ROBOT WAS PREEMPTED")
-            self.pick_confirmation_approved = False
-        else:
-            self.logger.info(
-                f"Pick Confirmation Response Received: approved ({self.pick_confirmation_approved}), xy ({self.pick_confirmation_xy}), image_index ({self.pick_confirmation_image_index})"
-            )
+            return ApprovalDecision.reject()
 
-        return (
-            self.pick_confirmation_approved,
-            self.pick_confirmation_xy,
-            self.pick_confirmation_image_index,
+        self.logger.info(
+            f"Pick Confirmation Response Received: approved ({self.pick_confirmation_approved}), "
+            f"walk_to ({self.pick_confirmation_walk_to}), xy ({self.pick_confirmation_xy}), "
+            f"image_index ({self.pick_confirmation_image_index}), "
+            f"stand_xy ({self.pick_confirmation_stand_xy})"
         )
+        pixel = (self.pick_confirmation_xy[0], self.pick_confirmation_xy[1])
+        if self.pick_confirmation_walk_to:
+            return ApprovalDecision.walk(
+                pixel,
+                self.pick_confirmation_image_index,
+                stand_pixel=self.pick_confirmation_stand_xy,
+            )
+        if self.pick_confirmation_approved:
+            return ApprovalDecision.approve(pixel, self.pick_confirmation_image_index)
+        return ApprovalDecision.reject()
 
     def pick_image_feedback(self, semantic_image, mask_image):
         bridge = CvBridge()
@@ -495,17 +564,27 @@ class RosFeedbackCollector:
 
         # self.pick_confirmation_event.set()
 
-        # If not approved, discontinue
-        # If approved, check whether the detection is overwritten
-        if not msg.approve:
-            self.logger.warn("Detection is invalid. Discontinuing pick action.")
-            self.pick_confirmation_approved = False
-        else:
+        # Three outcomes: approve (grasp here), walk_to (move closer and ask
+        # again), or neither (abandon the attempt).
+        self.pick_confirmation_walk_to = bool(msg.walk_to) and not msg.approve
+        self.pick_confirmation_stand_xy = None
+        if msg.approve:
             self.pick_confirmation_approved = True
             self.pick_confirmation_image_index = msg.image_index
             self.pick_confirmation_xy[0] = msg.image_x
             self.pick_confirmation_xy[1] = msg.image_y
             self.logger.warn("Detection is valid. Continuing pick action!")
+        elif self.pick_confirmation_walk_to:
+            self.pick_confirmation_approved = False
+            self.pick_confirmation_image_index = msg.image_index
+            self.pick_confirmation_xy[0] = msg.image_x
+            self.pick_confirmation_xy[1] = msg.image_y
+            if msg.has_stand_point:
+                self.pick_confirmation_stand_xy = (msg.stand_x, msg.stand_y)
+            self.logger.warn("Operator asked to walk closer before picking.")
+        else:
+            self.logger.warn("Detection is invalid. Discontinuing pick action.")
+            self.pick_confirmation_approved = False
         self.pick_confirmation_event.set()
 
     def log_lease_takeover(self, event: str):
@@ -577,6 +656,22 @@ class SpotExecutorRos(Node):
         self.declare_parameter("labelspace_grouping_path", "")
         self.declare_parameter("detector_model_path", "")
         detector_model_path = self.get_parameter("detector_model_path").value
+        # Distance short of an operator's walk-to point at which Spot stops to
+        # re-detect, when no explicit stand point was chosen.
+        self.declare_parameter("pick_walk_to_standoff", 1.5)
+        pick_walk_to_standoff = self.get_parameter("pick_walk_to_standoff").value
+        # JPEG + registered depth in manipulation requests (web console), or the
+        # legacy raw images the RViz approval panel expects.
+        # Longest single walk-to move (m); the ground-plane estimate is
+        # unreliable for far targets, so they are approached in steps.
+        self.declare_parameter("pick_walk_to_max_distance", 5.0)
+        pick_walk_to_max_distance = self.get_parameter(
+            "pick_walk_to_max_distance"
+        ).value
+        self.declare_parameter("compress_manipulation_requests", True)
+        compress_manipulation_requests = self.get_parameter(
+            "compress_manipulation_requests"
+        ).value
         # semantic_model_path = self.get_parameter("semantic_model_path").value
         # labelspace_path = self.get_parameter("labelspace_path").value
         # semantic_name_to_id = load_inverse_semantic_id_map_from_label_space(
@@ -615,6 +710,9 @@ class SpotExecutorRos(Node):
 
         self.feedback_collector = RosFeedbackCollector(
             self.odom_frame, output_dir, log_to_file, robot_color=robot_color
+        )
+        self.feedback_collector.compress_manipulation_requests = bool(
+            compress_manipulation_requests
         )
         self.feedback_collector.register_publishers(self)
 
@@ -840,6 +938,8 @@ class SpotExecutorRos(Node):
             follow_timeout_per_meter,
             plan_progress=self.plan_progress,
             plan_wait_timeout_s=float(self.get_parameter("plan_wait_timeout_s").value),
+            walk_to_standoff=pick_walk_to_standoff,
+            walk_to_max_distance=pick_walk_to_max_distance,
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 

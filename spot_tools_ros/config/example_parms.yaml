@@ -16,6 +16,16 @@
         labelspace_path: "labelspace_path"
         #labelspace_grouping_path: "(find-pkg-share semantic_inference)/config/label_groupings/ade20k_mit.yaml"
         labelspace_grouping_path: "grouping_path"
+        # pick: when the operator answers a grasp request with "walk to", stop the
+        # body center this far short of the clicked point (meters) before
+        # re-detecting, unless the operator chose an explicit stand point. Spot's
+        # front is ~0.55 m ahead of center, so 1.5 leaves ~0.95 m to the object.
+        pick_walk_to_standoff: 1.5
+        # longest single walk-to move (meters); far targets are approached in steps
+        pick_walk_to_max_distance: 5.0
+        # manipulation approval requests: JPEG candidates + registered depth (true,
+        # read by the web console) or legacy raw images (false, read by RViz).
+        compress_manipulation_requests: true
         # mid-level planner
         mid_level_planner_type: "astar"   # "astar" or "identity"
         lookahead_distance: 50            # grid cells
