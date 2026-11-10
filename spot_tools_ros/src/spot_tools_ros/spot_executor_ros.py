@@ -6,6 +6,7 @@ import time
 import traceback
 
 import numpy as np
+import cv2
 import rclpy
 import rclpy.time
 import spot_executor as se
@@ -54,6 +55,7 @@ from robot_executor_interface.mid_level_planner import (
 )
 from robot_executor_interface.plan_progress import PlanProgress
 from spot_tools_ros.fake_spot_ros import FakeSpotRos
+from spot_tools_ros.grasp_episode_log import GraspEpisodeLog
 from spot_tools_ros.occupancy_grid_ros_updater import OccupancyGridROSUpdater
 from spot_tools_ros.utils import get_tf_pose, waypoints_to_path
 
@@ -149,6 +151,14 @@ class RosFeedbackCollector:
 
         self.output_dir = output_dir
         self.log_to_file_level = log_to_file_level
+        # Per-pick episode log (operator requests/answers + executor messages);
+        # see grasp_episode_log.py. The answer message is kept for it.
+        self.episode_log = (
+            GraspEpisodeLog(os.path.join(output_dir, "grasp_episodes"))
+            if output_dir
+            else None
+        )
+        self.pick_confirmation_msg = None
 
         if log_to_file_level != "":
             os.makedirs(self.output_dir, exist_ok=True)
@@ -273,9 +283,18 @@ class RosFeedbackCollector:
         )
         request_msg.image_x = centroid_x if centroid_x is not None else 0
         request_msg.image_y = centroid_y if centroid_y is not None else 0
-        self.detection_img_pub.publish(request_msg)
-
         self.pick_confirmation_event.clear()
+        self.pick_confirmation_msg = None
+        self.detection_img_pub.publish(request_msg)
+        sent_at = time.time()
+        episode_step = None
+        if self.episode_log is not None:
+            raw_jpegs = None
+            if not request_msg.compressed_images:
+                raw_jpegs = [encode_jpeg(img) for img in detection_imgs]
+            episode_step = self.episode_log.request(
+                request_msg, semantic_class, raw_jpegs
+            )
 
         # Wait until input is received and self.pick_confirmation_response is set
         while (
@@ -285,6 +304,13 @@ class RosFeedbackCollector:
             self.logger.info("Waiting for user to confirm pick action...")
             self.pick_confirmation_event.wait(timeout=5)
 
+        if self.episode_log is not None:
+            self.episode_log.response(
+                episode_step,
+                sent_at,
+                self.pick_confirmation_msg,
+                preempted=bool(self.break_out_of_waiting_loop),
+            )
         if self.break_out_of_waiting_loop:
             self.logger.info("ROBOT WAS PREEMPTED")
             return ApprovalDecision.reject()
@@ -312,6 +338,11 @@ class RosFeedbackCollector:
         mask_img_msg = bridge.cv2_to_imgmsg(mask_image, encoding="passthrough")
         self.semantic_hand_pub.publish(semantic_hand_msg)
         self.semantic_mask_pub.publish(mask_img_msg)
+        if self.episode_log is not None:
+            for name, img in (("semantic", semantic_image), ("mask", mask_image)):
+                ok, png = cv2.imencode(".png", np.asarray(img))
+                if ok:
+                    self.episode_log.image(name, png.tobytes())
 
     def follow_path_feedback(self, path):
         path_debug_viz = waypoints_to_path("vision", path)
@@ -371,6 +402,8 @@ class RosFeedbackCollector:
         # "Logger severity cannot be changed between calls." Each severity needs
         # its own line.
         message = str(string)
+        if self.episode_log is not None:
+            self.episode_log.message(level, message)
         match level:
             case "DEBUG":
                 self.logger.debug(message)
@@ -420,6 +453,8 @@ class RosFeedbackCollector:
 
     def register_publishers(self, node):
         self.logger = node.get_logger()
+        if self.episode_log is not None:
+            self.episode_log.warn = self.logger.warning
         self._clock = node.get_clock()
 
         # ROS 2 transient local QoS for "latching" behavior
@@ -566,6 +601,7 @@ class RosFeedbackCollector:
 
         # Three outcomes: approve (grasp here), walk_to (move closer and ask
         # again), or neither (abandon the attempt).
+        self.pick_confirmation_msg = msg
         self.pick_confirmation_walk_to = bool(msg.walk_to) and not msg.approve
         self.pick_confirmation_stand_xy = None
         if msg.approve:
