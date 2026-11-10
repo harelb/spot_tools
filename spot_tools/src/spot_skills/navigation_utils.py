@@ -72,7 +72,7 @@ def navigate_to_relative_pose(
 
 
 def navigate_to_absolute_pose(
-    spot, waypoint, frame_name=VISION_FRAME_NAME, stairs=False
+    spot, waypoint, frame_name=VISION_FRAME_NAME, stairs=False, end_time=10.0
 ):
     robot_command_client = spot.robot.ensure_client(
         RobotCommandClient.default_service_name
@@ -112,7 +112,6 @@ def navigate_to_absolute_pose(
             frame_name=frame_name,
             params=params,
         )
-    end_time = 10.0
     cmd_id = robot_command_client.robot_command(
         lease=None, command=robot_cmd, end_time_secs=time.time() + end_time
     )
