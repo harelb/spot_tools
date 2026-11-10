@@ -123,9 +123,7 @@ standoff pose facing that point. The standoff distance is the executor parameter
 `pick_walk_to_standoff` (default `1.5` m, from the body center; Spot's front is ~0.55 m ahead of center). If the response carries a stand point
 (`has_stand_point`, `stand_x`, `stand_y`), the robot stands on that ground pixel
 instead and faces the target from there, which gives the operator heading control;
-the operator UIs keep that option behind a flag that is off by default. The
-planned target and stand pose are published as markers on `~/walk_to_visualizer`
-in the `vision` frame.
+the operator UIs keep that option behind a flag that is off by default.
 
 Pausing or terminating the plan interrupts a walk-to like any other motion. The
 offline tests `spot_tools/examples/test_walk_to_geometry.py` and

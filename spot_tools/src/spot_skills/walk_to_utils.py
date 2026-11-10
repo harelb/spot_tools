@@ -222,10 +222,6 @@ def walk_to_pixel(
         f"walking {np.hypot(gx - rx, gy - ry):.2f} m"
         + (f" (capped at {max_distance:.1f} m)" if capped else ""),
     )
-    walk_feedback = getattr(feedback, "walk_to_feedback", None)
-    if walk_feedback is not None:
-        walk_feedback(target, (gx, gy, gyaw))
-
     return _drive_to(
         spot, math_helpers.SE2Pose(gx, gy, gyaw), timeout, feedback, should_stop
     )

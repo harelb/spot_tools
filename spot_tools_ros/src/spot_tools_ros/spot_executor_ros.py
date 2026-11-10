@@ -247,22 +247,6 @@ class RosFeedbackCollector:
             return ApprovalDecision.approve(pixel, self.pick_confirmation_image_index)
         return ApprovalDecision.reject()
 
-    def walk_to_feedback(self, target_point, stand_pose):
-        """Show where the operator's walk-to click landed and where Spot will stand."""
-        target = PointMsg()
-        target.x, target.y, target.z = (float(v) for v in target_point[:3])
-        stand = PointMsg()
-        stand.x, stand.y = float(stand_pose[0]), float(stand_pose[1])
-        stand.z = float(target_point[2])
-        self.walk_to_pub.publish(
-            build_markers(
-                [target, stand],
-                ["walk_to_target", "walk_to_stand"],
-                ["vision", "vision"],
-                [[1, 0.5, 0], [0, 0.5, 1]],
-            )
-        )
-
     def pick_image_feedback(self, semantic_image, mask_image):
         bridge = CvBridge()
         semantic_hand_msg = bridge.cv2_to_imgmsg(semantic_image, encoding="passthrough")
@@ -399,10 +383,6 @@ class RosFeedbackCollector:
             ManipulationApprovalRequest,
             "~/manipulation_request",
             qos_profile=latching_qos,
-        )
-
-        self.walk_to_pub = node.create_publisher(
-            MarkerArray, "~/walk_to_visualizer", qos_profile=latching_qos
         )
 
         self.lease_takeover_publisher = node.create_publisher(String, "~/takeover", 10)
