@@ -117,54 +117,69 @@ class LeaseManager:
                         self.feedback.break_out_of_waiting_loop = True
 
                     self.taking_back_lease = True
-                    if self.feedback is not None:
-                        self.feedback.print(
-                            "INFO",
-                            "LEASE MANAGER THREAD: Trying to take lease back, since nobody owns it.",
-                        )
-                        self.feedback.log_lease_takeover("spot_executor_takes_lease")
-                    self.spot_interface.take_lease()
                     try:
-                        stow_arm(self.spot_interface)
-                        self.spot_interface.stand()
-                    except BehaviorFaultError:
-                        fault_ids = []
-                        for fault in (
-                            self.spot_interface.get_state().behavior_fault_state.faults
-                        ):
-                            if fault.cause == BehaviorFault.CAUSE_LEASE_TIMEOUT:
-                                fault_ids.append(fault.behavior_fault_id)
-                        for fault_id in fault_ids:
-                            if self.feedback is not None:
-                                self.feedback.print(
-                                    "INFO",
-                                    f"LEASE MANAGER THREAD: Clearing behavior fault {fault_id}",
-                                )
-                            self.spot_interface.command_client.clear_behavior_fault(
-                                fault_id
+                        self._take_back_lease()
+                    except Exception as e:  # noqa: BLE001
+                        # e.g. NotPoweredOnError while the robot is off: the thread
+                        # must survive and clear the flag, or every plan waits on
+                        # taking_back_lease forever.
+                        if self.feedback is not None:
+                            self.feedback.print(
+                                "WARNING",
+                                f"LEASE MANAGER THREAD: could not take the lease back: {e!r}",
                             )
-
-                        if (
-                            len(
-                                self.spot_interface.get_state().behavior_fault_state.faults
-                            )
-                            == 0
-                        ):
-                            self.spot_interface.stand()
-                        else:
-                            if self.feedback is not None:
-                                self.feedback.print(
-                                    "WARNING",
-                                    "LEASE MANAGER THREAD: Could not clear all behavior faults, cannot stand.",
-                                )
-                    time.sleep(1)
-                    if self.feedback is not None:
-                        self.feedback.break_out_of_waiting_loop = False
-                    self.taking_back_lease = False
+                    finally:
+                        time.sleep(1)
+                        if self.feedback is not None:
+                            self.feedback.break_out_of_waiting_loop = False
+                        self.taking_back_lease = False
                 time.sleep(0.1)
 
         self.monitoring_thread = threading.Thread(target=monitor_lease, daemon=False)
         self.monitoring_thread.start()
+
+    def _take_back_lease(self):
+        """Take the lease back (nobody holds it) and stand the robot up again."""
+        if self.feedback is not None:
+            self.feedback.print(
+                "INFO",
+                "LEASE MANAGER THREAD: Trying to take lease back, since nobody owns it.",
+            )
+            self.feedback.log_lease_takeover("spot_executor_takes_lease")
+        self.spot_interface.take_lease()
+        try:
+            stow_arm(self.spot_interface)
+            self.spot_interface.stand()
+        except BehaviorFaultError:
+            fault_ids = []
+            for fault in (
+                self.spot_interface.get_state().behavior_fault_state.faults
+            ):
+                if fault.cause == BehaviorFault.CAUSE_LEASE_TIMEOUT:
+                    fault_ids.append(fault.behavior_fault_id)
+            for fault_id in fault_ids:
+                if self.feedback is not None:
+                    self.feedback.print(
+                        "INFO",
+                        f"LEASE MANAGER THREAD: Clearing behavior fault {fault_id}",
+                    )
+                self.spot_interface.command_client.clear_behavior_fault(
+                    fault_id
+                )
+
+            if (
+                len(
+                    self.spot_interface.get_state().behavior_fault_state.faults
+                )
+                == 0
+            ):
+                self.spot_interface.stand()
+            else:
+                if self.feedback is not None:
+                    self.feedback.print(
+                        "WARNING",
+                        "LEASE MANAGER THREAD: Could not clear all behavior faults, cannot stand.",
+                    )
 
 
 class SpotExecutor:
