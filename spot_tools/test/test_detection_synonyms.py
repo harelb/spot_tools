@@ -217,13 +217,19 @@ def test_spot_executor_uses_symbolic_grasp_hook_without_camera():
     executor.debug = False
     command = SimpleNamespace(object_class="cone", object_id="o2")
     feedback = MagicMock()
+    holding_updates = []
+    feedback.set_robot_holding_state.side_effect = (
+        lambda holding, object_id, position=None: holding_updates.append(
+            (holding, object_id)
+        )
+    )
 
     with patch("spot_executor.spot_executor.object_grasp") as visual_grasp:
         assert executor.execute_pick(command, feedback)
 
     hook.assert_called_once_with()
     visual_grasp.assert_not_called()
-    feedback.set_robot_holding_state.assert_called_once_with(True, "O2")
+    assert holding_updates == [(True, "O2")]
 
 
 if __name__ == "__main__":
