@@ -325,8 +325,7 @@ class TeleopController:
         st = self.state(standing)
         parts = [
             "teleop=" + ("active" if st["active"] else "idle"),
-            "standing="
-            + {True: "yes", False: "no", None: "unknown"}[st["standing"]],
+            "standing=" + {True: "yes", False: "no", None: "unknown"}[st["standing"]],
         ]
         if st["busy"]:
             parts.append(f"busy={st['busy']}")
