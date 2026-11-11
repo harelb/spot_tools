@@ -38,7 +38,10 @@ def _report_action_result(feedback, command, action_index, status, detail=""):
     try:
         hook(command, action_index, status, detail)
     except Exception as e:  # noqa: BLE001 -- reporting is best-effort
-        feedback.print("INFO", f"action_result feedback failed: {e}")
+        try:
+            feedback.print("WARNING", f"action_result feedback failed: {e}")
+        except Exception:
+            pass  # feedback is unavailable; preserve the execution outcome
 
 
 def transform_command_frame(tf_trans, tf_q, command, feedback=None):
@@ -263,6 +266,7 @@ class SpotExecutor:
         with self._pause_lock:
             self.paused = False
 
+        ix = 0
         try:
             feedback.print("INFO", "Would like to execute: ")
             for command in sequence.actions:
@@ -445,8 +449,16 @@ class SpotExecutor:
                     time.sleep(2)
 
         except Exception as ex:
+            if ix < len(sequence.actions):
+                _report_action_result(
+                    feedback,
+                    sequence.actions[ix],
+                    ix,
+                    "FAILED",
+                    f"{type(ex).__name__}: {ex}",
+                )
             self.processing_action_sequence = False
-            raise ex
+            raise
 
         self.processing_action_sequence = False
 
