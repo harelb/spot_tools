@@ -39,6 +39,7 @@ from spot_skills.approval import ApprovalDecision
 from spot_skills.depth_utils import encode_depth_png, encode_jpeg
 from spot_skills.detection_utils import YOLODetector
 from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
 
 from robot_executor_interface.action_descriptions import Follow, Gaze, Pick, Place
@@ -555,6 +556,18 @@ class RosFeedbackCollector:
         self.lease_takeover_publisher.publish(msg)
 
 
+def take_lease_report(lease_manager) -> tuple[bool, str]:
+    """Force-take the lease via ``lease_manager``; ``(success, message)`` with the
+    owner before and after.  Never raises (a service callback must not)."""
+    try:
+        before, after = lease_manager.force_take()
+    except Exception as e:  # noqa: BLE001
+        return False, f"take failed: {type(e).__name__}: {e}"
+    ours = str(after).startswith("understanding")
+    msg = f"lease owner before: {before or '(nobody)'}; after: {after or '(nobody)'}"
+    return ours, msg if ours else f"{msg} (not ours after take)"
+
+
 class SpotExecutorRos(Node):
     def __init__(self):
         super().__init__("spot_executor_ros")
@@ -847,6 +860,15 @@ class SpotExecutorRos(Node):
         )
         self.stop_sub = self.create_subscription(Bool, "~/stop", self.handle_stop, 10)
 
+        # Operator override (console "Take lease"): forcibly take the Spot lease,
+        # e.g. from the tablet. Own group: it blocks on the robot for a moment.
+        self.take_lease_srv = self.create_service(
+            Trigger,
+            "~/take_lease",
+            self.handle_take_lease,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
     def _publish_plan_progress(self, plan_id, robot_name, task_id, state):
         msg = PlanProgressMsg()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -873,6 +895,17 @@ class SpotExecutorRos(Node):
         msg.status = NodeInfoMsg.NOMINAL
         msg.notes = self.status_str
         self.heartbeat_pub.publish(msg)
+
+    def handle_take_lease(self, request, response):
+        lease_manager = getattr(self.spot_executor, "lease_manager", None)
+        if lease_manager is None:
+            response.success = False
+            response.message = "no lease manager (executor not initialized)"
+            return response
+        response.success, response.message = take_lease_report(lease_manager)
+        log = self.get_logger().info if response.success else self.get_logger().error
+        log(f"take_lease: {response.message}")
+        return response
 
     def handle_pause(self, msg: Bool):
         if msg.data:
