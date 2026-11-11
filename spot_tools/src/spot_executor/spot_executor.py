@@ -24,7 +24,7 @@ from spot_skills.navigation_utils import (
 
 
 def _report_action_result(feedback, command, action_index, status, detail=""):
-    """Executor -> planner return channel (PR B5), duck-typed on feedback.
+    """Executor -> planner return channel, duck-typed on feedback.
 
     A feedback collector that implements ``action_result(command,
     action_index, status, detail)`` (RosFeedbackCollector publishes an
@@ -305,7 +305,10 @@ class SpotExecutor:
                 if not self.keep_going:
                     feedback.print("INFO", "Action sequence was pre-empted.")
                     _report_action_result(
-                        feedback, command, ix, "PREEMPTED",
+                        feedback,
+                        command,
+                        ix,
+                        "PREEMPTED",
                         "sequence pre-empted before this action completed",
                     )
                     break
@@ -344,11 +347,14 @@ class SpotExecutor:
                         # The action is being advanced past: either it
                         # succeeded, or it exhausted its retries (advanced
                         # with success=False). Report it on the executor ->
-                        # planner return channel (PR B5).
+                        # planner return channel.
                         _report_action_result(
-                            feedback, command, ix,
+                            feedback,
+                            command,
+                            ix,
                             "SUCCESS" if success else "FAILED",
-                            "" if success
+                            ""
+                            if success
                             else f"gave up after {inner_loop_attempts + 1} attempts",
                         )
                         # Final attempt for this action: report how it ended,

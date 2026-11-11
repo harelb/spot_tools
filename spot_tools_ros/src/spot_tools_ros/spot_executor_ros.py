@@ -103,7 +103,7 @@ class RosFeedbackCollector:
         self.plan_valid = True
         self.odom_frame = odom_frame
 
-        # Executor -> planner return channel (PR B5): publisher + the
+        # Executor -> planner return channel: publisher + the
         # dispatched sequence's identity, set by process_action_sequence
         # before execution starts so every per-action result can echo them.
         self.action_result_pub = None
@@ -356,7 +356,7 @@ class RosFeedbackCollector:
         pass
 
     def action_result(self, command, action_index, status, detail=""):
-        """Publish one action's outcome (PR B5). Called by
+        """Publish one action's outcome. Called by
         SpotExecutor._report_action_result; must never raise into the
         execution loop (the caller guards, this stays defensive anyway)."""
         if self.action_result_pub is None:
@@ -417,7 +417,7 @@ class RosFeedbackCollector:
 
         self.lease_takeover_publisher = node.create_publisher(String, "~/takeover", 10)
 
-        # PR B5: per-action results back to the planner. Plain queue QoS —
+        # Per-action results back to the planner. Plain queue QoS —
         # consumers want the stream, not just the last value.
         self.action_result_pub = node.create_publisher(
             ActionResultMsg, "~/action_result", 10
@@ -884,7 +884,7 @@ class SpotExecutorRos(Node):
                 self.get_logger().info("Starting action sequence")
                 sequence = from_msg(msg)
 
-                # PR B5: every per-action result echoes the dispatched
+                # Every per-action result echoes the dispatched
                 # sequence's identity.
                 self.feedback_collector.current_plan_id = msg.plan_id
                 self.feedback_collector.current_robot_name = msg.robot_name
