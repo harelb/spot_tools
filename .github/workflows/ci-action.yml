@@ -33,7 +33,7 @@ jobs:
       - name: Install hardware-free test dependencies
         run: |
             pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-            pip install ultralytics pygame
+            pip install ultralytics pygame PyOpenGL
             pip install ${{ github.workspace }}/spot_tools_repo/robot_executor_interface/robot_executor_interface
       - name: Run hardware-free unit tests
         working-directory: ${{ github.workspace }}/spot_tools_repo
