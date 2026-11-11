@@ -256,6 +256,10 @@ class Spot:
 
     def take_lease(self):
         self.lease_client.take()
+        if self.lease_keep_alive is not None:
+            # a second take (lease manager / operator) must not leave the old
+            # keep-alive thread running alongside the new one
+            self.lease_keep_alive.shutdown()
         self.lease_keep_alive = bosdyn.client.lease.LeaseKeepAlive(
             self.lease_client, warnings=False
         )
