@@ -764,6 +764,11 @@ class SpotExecutorRos(Node):
         self.plan_progress_pub = self.create_publisher(
             PlanProgressMsg, "/plan_progress", progress_qos
         )
+        # A separate robot-local uplink lets fleetlink forward progress to the
+        # base and fan it out without re-relaying the received global topic.
+        self.plan_progress_relay_pub = self.create_publisher(
+            PlanProgressMsg, "~/plan_progress", progress_qos
+        )
         self.plan_progress = PlanProgress(publish=self._publish_plan_progress)
         self.create_subscription(
             PlanProgressMsg, "/plan_progress", self._handle_plan_progress, progress_qos
@@ -817,6 +822,7 @@ class SpotExecutorRos(Node):
         msg.task_id = task_id
         msg.state = state
         self.plan_progress_pub.publish(msg)
+        self.plan_progress_relay_pub.publish(msg)
 
     def _handle_plan_progress(self, msg):
         """Fold in a report, including our own echoed back.

@@ -93,3 +93,25 @@ def test_wait_warning_uses_supported_ros_log_level_and_keeps_waiting(monkeypatch
     ex.process_action_sequence(ActionSequence("p", "robot", [command]), feedback)
     assert len(warnings) == 1 and "Still waiting" in warnings[0]
     assert executed == [command]
+
+
+def test_progress_reaches_both_shared_ros_and_radio_uplink():
+    pytest.importorskip("rclpy")
+    from builtin_interfaces.msg import Time
+    from spot_tools_ros.spot_executor_ros import SpotExecutorRos
+
+    shared, uplink = [], []
+    node = NS(
+        get_clock=lambda: NS(now=lambda: NS(to_msg=Time)),
+        plan_progress_pub=NS(publish=shared.append),
+        plan_progress_relay_pub=NS(publish=uplink.append),
+    )
+    SpotExecutorRos._publish_plan_progress(node, "plan", "robot", "task", "DONE")
+    assert len(shared) == len(uplink) == 1
+    assert shared[0] == uplink[0]
+    assert (
+        shared[0].plan_id,
+        shared[0].robot_name,
+        shared[0].task_id,
+        shared[0].state,
+    ) == ("plan", "robot", "task", "DONE")
