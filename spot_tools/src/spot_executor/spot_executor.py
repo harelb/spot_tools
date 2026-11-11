@@ -324,7 +324,7 @@ class SpotExecutor:
                             break
                         if now - warned_at > 30.0:
                             feedback.print(
-                                "WARN",
+                                "WARNING",
                                 f"Still waiting ({waited:.0f} s) on: {'; '.join(blocked)}",
                             )
                             warned_at = now
@@ -366,6 +366,18 @@ class SpotExecutor:
                         report = getattr(feedback, "report_action_done", None)
                         if report is not None:
                             report(sequence, command, success)
+                        # A failed scheduled action has not established the
+                        # task's effects. Stop this plan and leave dependents
+                        # blocked instead of reporting the task as DONE.
+                        if not success and getattr(command, "task_id", ""):
+                            feedback.print(
+                                "ERROR",
+                                f"Task {command.task_id} failed after "
+                                f"{inner_loop_attempts + 1} attempts; stopping this plan.",
+                            )
+                            self.keep_going = False
+                            self._stop_robot(feedback)
+                            break
                         # A task spans several actions (a relocation is a pick,
                         # a carry and a place); it is finished once the next
                         # action belongs to a different one.
