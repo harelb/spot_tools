@@ -882,8 +882,8 @@ class SpotExecutorRos(Node):
             1,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
-        # stand/sit block on the robot for seconds: own groups, so cmd_vel and
-        # the deadman keep running meanwhile
+        # Stand/sit use separate callback groups; the controller's motion lock
+        # serializes them with plan handoffs and velocity commands.
         self.stand_srv = self.create_service(
             Trigger,
             "~/stand",
@@ -962,8 +962,10 @@ class SpotExecutorRos(Node):
             self.get_logger().info("Received external resume request.")
             if self.spot_executor.processing_action_sequence:
                 # the plan takes the robot back
-                self.teleop.cancel("plan resumed")
-            self.spot_executor.set_paused(False, self.feedback_collector)
+                with self.teleop.plan_control("plan resumed"):
+                    self.spot_executor.set_paused(False, self.feedback_collector)
+            else:
+                self.spot_executor.set_paused(False, self.feedback_collector)
 
     def handle_stop(self, msg: Bool):
         # Operator stop also ends teleop and halts the robot (lease permitting).
@@ -986,6 +988,7 @@ class SpotExecutorRos(Node):
             with self._plan_id_lock:
                 if self._current_plan_id == getattr(msg, "plan_id", None):
                     self._current_plan_id = None
+                    self.spot_executor.processing_action_sequence = False
             self.get_logger().error(
                 "Failed to handle incoming plan "
                 f"(plan_id={getattr(msg, 'plan_id', '<unknown>')}); node staying up:\n"
@@ -1003,14 +1006,20 @@ class SpotExecutorRos(Node):
                     f"Ignoring duplicate plan (plan_id={msg.plan_id}), already executing"
                 )
                 return
-            # An incoming plan takes the robot from the operator.
-            self.teleop.cancel(f"new plan {msg.plan_id} received")
-            if self.background_thread is not None and self.background_thread.is_alive():
-                self.get_logger().info(
-                    f"Preempting current plan (plan_id={self._current_plan_id}) with new plan (plan_id={msg.plan_id})"
-                )
-                self.spot_executor.terminate_sequence(self.feedback_collector)
-            self._current_plan_id = msg.plan_id
+            with self.teleop.plan_control(f"new plan {msg.plan_id} received"):
+                # An incoming plan takes the robot from the operator.
+                if (
+                    self.background_thread is not None
+                    and self.background_thread.is_alive()
+                ):
+                    self.get_logger().info(
+                        f"Preempting current plan (plan_id={self._current_plan_id}) with new plan (plan_id={msg.plan_id})"
+                    )
+                    self.spot_executor.terminate_sequence(self.feedback_collector)
+                self._current_plan_id = msg.plan_id
+
+                self.spot_executor.processing_action_sequence = True
+                self.spot_executor.paused = False
 
         def process_sequence():
             try:
@@ -1039,6 +1048,7 @@ class SpotExecutorRos(Node):
                 with self._plan_id_lock:
                     if self._current_plan_id == msg.plan_id:
                         self._current_plan_id = None
+                        self.spot_executor.processing_action_sequence = False
                 self.status_str = "Idle"
 
         self.feedback_collector.break_out_of_waiting_loop = False
