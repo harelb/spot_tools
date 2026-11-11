@@ -23,6 +23,27 @@ from spot_skills.navigation_utils import (
 )
 
 
+def _report_action_result(feedback, command, action_index, status, detail=""):
+    """Executor -> planner return channel, duck-typed on feedback.
+
+    A feedback collector that implements ``action_result(command,
+    action_index, status, detail)`` (RosFeedbackCollector publishes an
+    ActionResultMsg) gets each action's outcome; collectors that don't (the
+    pyplot one, test fakes) are silently unaffected. The report must never
+    break execution — the action already ran.
+    """
+    hook = getattr(feedback, "action_result", None)
+    if hook is None:
+        return
+    try:
+        hook(command, action_index, status, detail)
+    except Exception as e:  # noqa: BLE001 -- reporting is best-effort
+        try:
+            feedback.print("WARNING", f"action_result feedback failed: {e}")
+        except Exception:
+            pass  # feedback is unavailable; preserve the execution outcome
+
+
 def transform_command_frame(tf_trans, tf_q, command, feedback=None):
     # command is Nx3 numpy array
 
@@ -251,6 +272,7 @@ class SpotExecutor:
         with self._pause_lock:
             self.paused = False
 
+        ix = 0
         try:
             feedback.print("INFO", "Would like to execute: ")
             for command in sequence.actions:
@@ -297,6 +319,13 @@ class SpotExecutor:
 
                 if not self.keep_going:
                     feedback.print("INFO", "Action sequence was pre-empted.")
+                    _report_action_result(
+                        feedback,
+                        command,
+                        ix,
+                        "PREEMPTED",
+                        "sequence pre-empted before this action completed",
+                    )
                     break
                 pick_next = False
                 if ix < len(sequence.actions) - 1:
@@ -367,6 +396,19 @@ class SpotExecutor:
                             f"SpotExecutor received unknown command type {type(command)}"
                         )
                     if success or inner_loop_attempts > 1:
+                        # The action is being advanced past: either it
+                        # succeeded, or it exhausted its retries (advanced
+                        # with success=False). Report it on the executor ->
+                        # planner return channel.
+                        _report_action_result(
+                            feedback,
+                            command,
+                            ix,
+                            "SUCCESS" if success else "FAILED",
+                            ""
+                            if success
+                            else f"gave up after {inner_loop_attempts + 1} attempts",
+                        )
                         # Final attempt for this action: report how it ended,
                         # so mission progress is known whatever planned it.
                         report = getattr(feedback, "report_action_done", None)
@@ -413,8 +455,16 @@ class SpotExecutor:
                     time.sleep(2)
 
         except Exception as ex:
+            if ix < len(sequence.actions):
+                _report_action_result(
+                    feedback,
+                    sequence.actions[ix],
+                    ix,
+                    "FAILED",
+                    f"{type(ex).__name__}: {ex}",
+                )
             self.processing_action_sequence = False
-            raise ex
+            raise
 
         self.processing_action_sequence = False
 

@@ -26,6 +26,7 @@ from robot_executor_interface_ros.action_descriptions_ros import from_msg
 from robot_executor_msgs.msg import (
     ActionDoneMsg,
     ActionMsg,
+    ActionResultMsg,
     ActionSequenceMsg,
     PlanProgressMsg,
 )
@@ -103,6 +104,14 @@ class RosFeedbackCollector:
         self.break_out_of_waiting_loop = False
         self.plan_valid = True
         self.odom_frame = odom_frame
+
+        # Executor -> planner return channel: publisher + the
+        # dispatched sequence's identity, set by process_action_sequence
+        # before execution starts so every per-action result can echo them.
+        self.action_result_pub = None
+        self._clock = None
+        self.current_plan_id = ""
+        self.current_robot_name = ""
 
         self.output_dir = output_dir
         self.log_to_file_level = log_to_file_level
@@ -348,6 +357,23 @@ class RosFeedbackCollector:
     def feedback_viz_2(self, y):
         pass
 
+    def action_result(self, command, action_index, status, detail=""):
+        """Publish one action's outcome. Called by
+        SpotExecutor._report_action_result; must never raise into the
+        execution loop (the caller guards, this stays defensive anyway)."""
+        if self.action_result_pub is None:
+            return
+        msg = ActionResultMsg()
+        if self._clock is not None:
+            msg.header.stamp = self._clock.now().to_msg()
+        msg.robot_name = self.current_robot_name
+        msg.plan_id = self.current_plan_id
+        msg.action_type = type(command).__name__.upper()
+        msg.action_index = int(action_index)
+        msg.status = str(status)
+        msg.detail = str(detail)
+        self.action_result_pub.publish(msg)
+
     def register_publishers(self, node):
         self.logger = node.get_logger()
         self._clock = node.get_clock()
@@ -392,6 +418,13 @@ class RosFeedbackCollector:
         )
 
         self.lease_takeover_publisher = node.create_publisher(String, "~/takeover", 10)
+
+        # Per-action results back to the planner. Plain queue QoS —
+        # consumers want the stream, not just the last value.
+        self.action_result_pub = node.create_publisher(
+            ActionResultMsg, "~/action_result", 10
+        )
+        self._clock = node.get_clock()
 
         node.create_subscription(
             ManipulationApprovalResponse,
@@ -900,6 +933,11 @@ class SpotExecutorRos(Node):
                 self.status_str = "Processing action sequence"
                 self.get_logger().info("Starting action sequence")
                 sequence = from_msg(msg)
+
+                # Every per-action result echoes the dispatched
+                # sequence's identity.
+                self.feedback_collector.current_plan_id = msg.plan_id
+                self.feedback_collector.current_robot_name = msg.robot_name
 
                 self.spot_executor.process_action_sequence(
                     sequence, self.feedback_collector
