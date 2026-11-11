@@ -8,6 +8,7 @@ import pytest
 
 try:
     import spot_executor.spot_executor as se
+
     from robot_executor_interface.action_descriptions import ActionSequence, Follow
 except ImportError:  # spot_tools (bosdyn) not installed
     se = None
