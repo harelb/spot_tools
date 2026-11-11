@@ -40,8 +40,28 @@ def _(action: ActionSequence):
     msg.header.stamp = gtm()
 
     print([to_msg(a) for a in action.actions])
-    msg.actions = [to_msg(a) for a in action.actions]
+    msg.actions = [_ordering_to_msg(a, to_msg(a)) for a in action.actions]
     return msg
+
+
+def _ordering_to_msg(action, msg):
+    """Copy the ordering fields every action type shares.
+
+    Done here rather than in each per-type converter: the fields are identical
+    across the four types, and four more places to forget one is how an action
+    silently loses its precedence.
+    """
+    msg.task_id = getattr(action, "task_id", "") or ""
+    msg.after_task_ids = list(getattr(action, "after_task_ids", None) or [])
+    msg.coalition_robots = list(getattr(action, "coalition_robots", None) or [])
+    return msg
+
+
+def _ordering_from_msg(msg, action):
+    action.task_id = msg.task_id
+    action.after_task_ids = list(msg.after_task_ids)
+    action.coalition_robots = list(msg.coalition_robots)
+    return action
 
 
 @to_viz_msg.register
@@ -66,6 +86,7 @@ def from_msg(msg):
                 actions.append(gaze_from_msg(a))
             case _:
                 raise Exception(f"Received invalid action type {a.action_type}")
+        _ordering_from_msg(a, actions[-1])
     return ActionSequence(
         plan_id=msg.plan_id, robot_name=msg.robot_name, actions=actions
     )

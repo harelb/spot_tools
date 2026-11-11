@@ -30,6 +30,11 @@ jobs:
         run: |
             pip install ${{ github.workspace }}/spot_tools_repo/spot_tools
             pip install ${{ github.workspace }}/spot_tools_repo/spot_tools_ros
-      #- name: Run test script
-      #  run: cd ${{ github.workspace }}/ouroboros_repo && pytest --ignore=third_party
-      #- run: echo "🍏 This job's status is ${{ job.status }}."
+      - name: Install hardware-free test dependencies
+        run: |
+            pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+            pip install ultralytics pygame
+            pip install ${{ github.workspace }}/spot_tools_repo/robot_executor_interface/robot_executor_interface
+      - name: Run hardware-free unit tests
+        working-directory: ${{ github.workspace }}/spot_tools_repo
+        run: python -m pytest robot_executor_interface/robot_executor_interface/tests spot_tools/test -v
