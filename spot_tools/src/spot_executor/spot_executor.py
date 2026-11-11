@@ -409,6 +409,13 @@ class SpotExecutor:
                     feedback.log_lease_takeover("manual_intervention")
                     # Wait until the lease manager has taken the lease back
                     time.sleep(2)
+                except Exception:
+                    # The sequence is aborted: report the action as failed, so
+                    # whatever planned it hears now rather than never.
+                    report = getattr(feedback, "report_action_done", None)
+                    if report is not None:
+                        report(sequence, command, False)
+                    raise
 
         except Exception as ex:
             self.processing_action_sequence = False
@@ -558,6 +565,12 @@ class SpotExecutor:
         # out before the follower could see the robot was already there.
         start = np.array(self.spot_interface.get_pose()[:2])
         path_distance += np.linalg.norm(command_to_send[0, :2] - start)
+        if len(command_to_send) == 1:
+            # A path needs two points (the follower and mid-level planners make
+            # a LineString of it); drive from where the robot is.
+            here = command_to_send[0].copy()
+            here[:2] = start
+            command_to_send = np.vstack([here, command_to_send])
         timeout = max(path_distance * 6, 5.0)
         feedback.print(
             "INFO",
