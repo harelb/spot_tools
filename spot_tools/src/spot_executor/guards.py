@@ -7,6 +7,7 @@ Spot's snapshot can omit fields transiently — every guard therefore reports a
 unknown means (the planner's dispatch gate fails OPEN on unknown, with a
 warning: a missing guard stream must not brick planning).
 """
+
 from __future__ import annotations
 
 
@@ -22,10 +23,14 @@ def extract_runtime_guards(
     ...``), "" when nobody holds it or it is unknown.
     """
     out = {
-        "battery_percent": -1.0, "battery_known": False,
-        "estop_pressed": False, "estop_known": False,
-        "powered_on": False, "power_known": False,
-        "lease_owned": bool(lease_owned), "lease_known": lease_owned is not None,
+        "battery_percent": -1.0,
+        "battery_known": False,
+        "estop_pressed": False,
+        "estop_known": False,
+        "powered_on": False,
+        "power_known": False,
+        "lease_owned": bool(lease_owned),
+        "lease_known": lease_owned is not None,
         "lease_owner": str(lease_owner or ""),
         "faults": [],
     }
@@ -43,8 +48,7 @@ def extract_runtime_guards(
         estops = list(getattr(robot_state, "estop_states", []) or [])
         if estops:
             # bosdyn EStopState.STATE_ESTOPPED == 1, STATE_NOT_ESTOPPED == 2.
-            out["estop_pressed"] = any(
-                getattr(e, "state", 0) == 1 for e in estops)
+            out["estop_pressed"] = any(getattr(e, "state", 0) == 1 for e in estops)
             out["estop_known"] = True
     except Exception:  # noqa: BLE001
         pass
