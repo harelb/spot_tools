@@ -129,3 +129,15 @@ Pausing or terminating the plan interrupts a walk-to like any other motion. The
 offline tests `spot_tools/examples/test_walk_to_geometry.py` and
 `spot_tools/examples/test_object_grasp_walk_to.py` cover the geometry and the
 approval loop without a robot or the Boston Dynamics SDK. 
+## Executor tests
+
+The CI workflow runs the hardware-free executor and plan-progress tests:
+
+```bash
+python -m pytest robot_executor_interface/robot_executor_interface/tests spot_tools/test -v
+```
+
+They use fake robot interfaces and do not command hardware. ROS-specific tests
+in `spot_tools_ros/test` additionally need a sourced ROS workspace with matching
+`robot_executor_msgs`, `heracles_ros_interfaces`, and the executor's ROS dependencies.
+Run those locally after rebuilding the message packages on the base station and robots.

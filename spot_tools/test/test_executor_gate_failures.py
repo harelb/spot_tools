@@ -4,11 +4,10 @@ from types import SimpleNamespace as NS
 
 import numpy as np
 import pytest
-import spot_executor.spot_executor as se
-
 from robot_executor_interface.action_descriptions import ActionSequence, Follow, Pick
 from robot_executor_interface.plan_progress import PlanProgress
-from spot_tools_ros.spot_executor_ros import RosFeedbackCollector
+
+import spot_executor.spot_executor as se
 
 
 class Feedback:
@@ -69,6 +68,9 @@ def test_failed_task_never_announces_done_or_runs_its_remaining_actions(
 
 
 def test_wait_warning_uses_supported_ros_log_level_and_keeps_waiting(monkeypatch):
+    pytest.importorskip("rclpy")
+    from spot_tools_ros.spot_executor_ros import RosFeedbackCollector
+
     progress = PlanProgress()
     ex, _ = executor(progress)
     command = Follow("map", np.zeros((2, 3)), task_id="b", after_task_ids=["a"])
