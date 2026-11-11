@@ -26,6 +26,14 @@
         # manipulation approval requests: JPEG candidates + registered depth (true,
         # read by the web console) or legacy raw images (false, read by RViz).
         compress_manipulation_requests: true
+        # place: warn when the robot drops the object farther than this (meters)
+        # from the plan's place point (logging only)
+        place_distance_warn_m: 1.0
+        # holding updates to the base station's update_holding_state service,
+        # which may be relayed: wait per attempt (s), reply timeout (s), attempts
+        holding_service_wait_s: 3.0
+        holding_service_call_timeout_s: 5.0
+        holding_service_attempts: 3
         # mid-level planner
         mid_level_planner_type: "astar"   # "astar" or "identity"
         lookahead_distance: 50            # grid cells

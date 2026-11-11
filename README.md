@@ -141,3 +141,12 @@ They use fake robot interfaces and do not command hardware. ROS-specific tests
 in `spot_tools_ros/test` additionally need a sourced ROS workspace with matching
 `robot_executor_msgs`, `heracles_ros_interfaces`, and the executor's ROS dependencies.
 Run those locally after rebuilding the message packages on the base station and robots.
+
+### Holding updates over relayed links
+
+The executor retries the base station's `UpdateHoldingState` service using
+`holding_service_attempts` (default 3), `holding_service_wait_s` (3 seconds per
+attempt), and `holding_service_call_timeout_s` (5 seconds per reply). A failed
+update is logged without changing a successful pick/place result; `/action_done`
+also reports the completed action. The client uses a separate callback group so
+a preempting plan cannot block its reply while waiting for the old sequence.
