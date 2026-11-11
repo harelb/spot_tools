@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -12,6 +13,7 @@ import tf2_ros
 import yaml
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point as PointMsg
+from geometry_msgs.msg import Twist
 from heracles_ros_interfaces.srv import UpdateHoldingState
 from nav_msgs.msg import Path
 from nlu_interface_rviz.msg import (
@@ -35,6 +37,7 @@ from sensor_msgs.msg import CompressedImage, Image
 from shapely.geometry import Point
 from spot_executor.fake_spot import FakeSpot
 from spot_executor.spot import Spot
+from spot_executor.teleop import HARD_MAX, TeleopController
 from spot_skills.approval import ApprovalDecision
 from spot_skills.depth_utils import encode_depth_png, encode_jpeg
 from spot_skills.detection_utils import YOLODetector
@@ -869,6 +872,8 @@ class SpotExecutorRos(Node):
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
 
+        self.setup_teleop()
+
     def _publish_plan_progress(self, plan_id, robot_name, task_id, state):
         msg = PlanProgressMsg()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -887,6 +892,95 @@ class SpotExecutorRos(Node):
         built the same way, rather than one path for self and one for others.
         """
         self.plan_progress.record(msg.plan_id, msg.robot_name, msg.task_id, msg.state)
+
+    # ---------------------------------------------------------------- teleop
+    def setup_teleop(self):
+        """Operator teleop through the executor (it owns the lease): ~/cmd_vel
+        (geometry_msgs/Twist, body frame), ~/stand and ~/sit (std_srvs/Trigger),
+        ~/teleop_state (std_msgs/String JSON).  Caps can only be lowered below
+        spot_executor.teleop.HARD_MAX; a deadman stops the robot when cmd_vel
+        stops arriving."""
+        self.declare_parameter("teleop_max_vx", HARD_MAX["vx"])
+        self.declare_parameter("teleop_max_vy", HARD_MAX["vy"])
+        self.declare_parameter("teleop_max_wz", HARD_MAX["wz"])
+        self.declare_parameter("teleop_deadman_s", 0.5)
+
+        def log(level, message):
+            self.feedback_collector.print(level, message)
+
+        self.teleop = TeleopController(
+            self.spot_interface,
+            self.spot_executor,
+            max_vx=self.get_parameter("teleop_max_vx").value,
+            max_vy=self.get_parameter("teleop_max_vy").value,
+            max_wz=self.get_parameter("teleop_max_wz").value,
+            deadman_s=self.get_parameter("teleop_deadman_s").value,
+            log=log,
+        )
+        self.get_logger().info(
+            f"teleop caps {self.teleop.caps}, deadman {self.teleop.deadman_s} s"
+        )
+        self._teleop_standing = None
+        self._teleop_state_tick = 0
+        self._teleop_was_active = False
+        self.teleop_state_pub = self.create_publisher(String, "~/teleop_state", 1)
+        self.cmd_vel_sub = self.create_subscription(
+            Twist,
+            "~/cmd_vel",
+            self.handle_cmd_vel,
+            1,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+        # Stand/sit use separate callback groups; the controller's motion lock
+        # serializes them with plan handoffs and velocity commands.
+        self.stand_srv = self.create_service(
+            Trigger,
+            "~/stand",
+            lambda req, res: self._posture_service(self.teleop.stand, res),
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+        self.sit_srv = self.create_service(
+            Trigger,
+            "~/sit",
+            lambda req, res: self._posture_service(self.teleop.sit, res),
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+        self.teleop_timer = self.create_timer(
+            0.05, self.teleop_tick, callback_group=MutuallyExclusiveCallbackGroup()
+        )
+
+    def handle_cmd_vel(self, msg: Twist):
+        self.teleop.cmd_vel(msg.linear.x, msg.linear.y, msg.angular.z)
+
+    def _posture_service(self, fn, response):
+        response.success, response.message = fn()
+        self.publish_teleop_state(refresh_standing=True)
+        return response
+
+    def teleop_tick(self):
+        """Deadman at 20 Hz; teleop state at 5 Hz while active, else 1 Hz, and
+        at once when teleop starts or stops."""
+        self.teleop.tick()
+        self._teleop_state_tick += 1
+        active = self.teleop.active
+        every = 4 if active else 20
+        if active != self._teleop_was_active or self._teleop_state_tick % every == 0:
+            self.publish_teleop_state(
+                refresh_standing=self._teleop_state_tick % 20 == 0
+            )
+        self._teleop_was_active = active
+
+    def publish_teleop_state(self, refresh_standing=False):
+        try:
+            if refresh_standing or self._teleop_standing is None:
+                self._teleop_standing = self.teleop.robot_standing()
+            st = self.teleop.state(self._teleop_standing)
+            st["robot"] = self.get_namespace().strip("/")
+            st["executor"] = self.status_str
+            st["t"] = time.time()
+            self.teleop_state_pub.publish(String(data=json.dumps(st)))
+        except Exception as e:  # noqa: BLE001 -- state is best effort
+            self.get_logger().warning(f"teleop state: {e}")
 
     def hb_callback(self):
         msg = NodeInfoMsg()
@@ -915,9 +1009,16 @@ class SpotExecutorRos(Node):
     def handle_resume(self, msg: Bool):
         if msg.data:
             self.get_logger().info("Received external resume request.")
-            self.spot_executor.set_paused(False, self.feedback_collector)
+            if self.spot_executor.processing_action_sequence:
+                # the plan takes the robot back
+                with self.teleop.plan_control("plan resumed"):
+                    self.spot_executor.set_paused(False, self.feedback_collector)
+            else:
+                self.spot_executor.set_paused(False, self.feedback_collector)
 
     def handle_stop(self, msg: Bool):
+        # Operator stop also ends teleop and halts the robot (lease permitting).
+        self.teleop.cancel("stop requested", force_stop=True)
         # Best-effort hard stop of the current action sequence, if any.
         if self.background_thread is not None and self.background_thread.is_alive():
             self.get_logger().info(
@@ -937,6 +1038,7 @@ class SpotExecutorRos(Node):
             with self._plan_id_lock:
                 if self._current_plan_id == getattr(msg, "plan_id", None):
                     self._current_plan_id = None
+                    self.spot_executor.processing_action_sequence = False
             self.get_logger().error(
                 "Failed to handle incoming plan "
                 f"(plan_id={getattr(msg, 'plan_id', '<unknown>')}); node staying up:\n"
@@ -954,12 +1056,20 @@ class SpotExecutorRos(Node):
                     f"Ignoring duplicate plan (plan_id={msg.plan_id}), already executing"
                 )
                 return
-            if self.background_thread is not None and self.background_thread.is_alive():
-                self.get_logger().info(
-                    f"Preempting current plan (plan_id={self._current_plan_id}) with new plan (plan_id={msg.plan_id})"
-                )
-                self.spot_executor.terminate_sequence(self.feedback_collector)
-            self._current_plan_id = msg.plan_id
+            with self.teleop.plan_control(f"new plan {msg.plan_id} received"):
+                # An incoming plan takes the robot from the operator.
+                if (
+                    self.background_thread is not None
+                    and self.background_thread.is_alive()
+                ):
+                    self.get_logger().info(
+                        f"Preempting current plan (plan_id={self._current_plan_id}) with new plan (plan_id={msg.plan_id})"
+                    )
+                    self.spot_executor.terminate_sequence(self.feedback_collector)
+                self._current_plan_id = msg.plan_id
+
+                self.spot_executor.processing_action_sequence = True
+                self.spot_executor.paused = False
 
         def process_sequence():
             try:
@@ -988,6 +1098,7 @@ class SpotExecutorRos(Node):
                 with self._plan_id_lock:
                     if self._current_plan_id == msg.plan_id:
                         self._current_plan_id = None
+                        self.spot_executor.processing_action_sequence = False
                 self.status_str = "Idle"
 
         self.feedback_collector.break_out_of_waiting_loop = False
