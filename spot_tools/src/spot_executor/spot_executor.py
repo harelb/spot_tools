@@ -190,6 +190,7 @@ class SpotExecutor:
         walk_to_max_distance=5.0,
         plan_progress=None,
         plan_wait_timeout_s=900.0,
+        follow_timeout_per_meter=6.0,
     ):
         self.debug = False
         self.spot_interface = spot_interface
@@ -216,6 +217,9 @@ class SpotExecutor:
         # reports, and without this the robot would stand still silently.
         self.plan_wait_timeout_s = plan_wait_timeout_s
         self._pause_lock = threading.Lock()
+        self.follow_timeout_per_meter = float(follow_timeout_per_meter)
+        if self.follow_timeout_per_meter <= 0:
+            raise ValueError("follow_timeout_per_meter must be positive")
 
         self.lease_manager = None
 
@@ -576,7 +580,7 @@ class SpotExecutor:
         # out before the follower could see the robot was already there.
         start = np.array(self.spot_interface.get_pose()[:2])
         path_distance += np.linalg.norm(command_to_send[0, :2] - start)
-        timeout = max(path_distance * 6, 5.0)
+        timeout = max(path_distance * self.follow_timeout_per_meter, 5.0)
         feedback.print(
             "INFO",
             f"Using continous follower with params:\n\tlookahead: {self.follower_lookahead}\n\tgoal tolerance: {self.goal_tolerance}\n\ttimeout: {timeout}",
