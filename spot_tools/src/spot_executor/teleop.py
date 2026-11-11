@@ -24,6 +24,7 @@ import inspect
 import math
 import threading
 import time
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -147,6 +148,8 @@ class TeleopController:
     # ------------------------------------------------------------- velocity
     def cmd_vel(self, vx: float, vy: float, wz: float) -> tuple[bool, str]:
         """One operator velocity command (body frame).  ``(accepted, reason)``."""
+        if self.busy:
+            return self._reject(f"{self.busy} in progress")
         try:
             raw = [float(vx), float(vy), float(wz)]
         except (TypeError, ValueError):
@@ -222,6 +225,13 @@ class TeleopController:
                 self._stop_motion()
                 self.last_event = reason
 
+    @contextmanager
+    def plan_control(self, reason: str):
+        """Serialize a plan handoff with posture and velocity commands."""
+        with self._lock:
+            self.cancel(reason)
+            yield
+
     def _halt(self, reason: str) -> None:
         self.active = False
         self.commanded = (0.0, 0.0, 0.0)
@@ -271,19 +281,19 @@ class TeleopController:
             if self.active:
                 self._halt(f"{what} requested")
             self.busy = what
-        try:
-            getattr(self.spot, what)()
-        except Exception as e:  # noqa: BLE001 -- AssertionError, lease errors ...
-            msg = f"{what} failed: {type(e).__name__}: {e}"
+            try:
+                getattr(self.spot, what)()
+            except Exception as e:  # noqa: BLE001 -- AssertionError, lease errors ...
+                msg = f"{what} failed: {type(e).__name__}: {e}"
+                with self._lock:
+                    self.busy = ""
+                    self.last_event = msg
+                return False, msg
             with self._lock:
                 self.busy = ""
-                self.last_event = msg
-            return False, msg
-        with self._lock:
-            self.busy = ""
-            self.standing = standing
-            self.last_event = f"{what} done"
-        return True, f"{what} done"
+                self.standing = standing
+                self.last_event = f"{what} done"
+            return True, f"{what} done"
 
     # ---------------------------------------------------------------- state
     def robot_standing(self):

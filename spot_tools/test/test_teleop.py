@@ -338,3 +338,45 @@ def test_send_body_velocity_without_duration_kwarg():
 
     send_body_velocity(Sim(), 0.1, 0.2, 0.3, 0.5)
     assert seen == [(0.1, 0.2, 0.3)]
+
+
+def test_plan_handoff_waits_for_posture_and_blocks_new_manual_commands():
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    entered = threading.Event()
+    finish = threading.Event()
+    plan_waiting = threading.Event()
+    plan_started = threading.Event()
+
+    class SlowSit(TwistSpot):
+        def sit(self):
+            entered.set()
+            assert finish.wait(2)
+            super().sit()
+
+    t, spot, ex, _ = make(spot=SlowSit())
+
+    def start_plan():
+        plan_waiting.set()
+        with t.plan_control("new plan"):
+            assert not t.busy
+            ex.processing_action_sequence = True
+            ex.paused = False
+            plan_started.set()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        posture = pool.submit(t.sit)
+        assert entered.wait(1)
+        plan = pool.submit(start_plan)
+        assert plan_waiting.wait(1)
+        try:
+            assert not plan_started.wait(0.05)
+        finally:
+            finish.set()
+        assert posture.result(timeout=2)[0]
+        plan.result(timeout=2)
+    assert plan_started.is_set()
+    assert not t.cmd_vel(0.3, 0, 0)[0]
+    assert not t.stand()[0]
+    assert spot.calls == ["sit"]

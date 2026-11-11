@@ -2,6 +2,7 @@
 events end teleop. Handlers are called unbound on a stand-in node."""
 
 import threading
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from std_msgs.msg import Bool
@@ -15,6 +16,11 @@ class Teleop:
 
     def cancel(self, reason, force_stop=False):
         self.cancels.append((reason, force_stop))
+
+    @contextmanager
+    def plan_control(self, reason):
+        self.cancel(reason)
+        yield
 
 
 class Log:
@@ -68,3 +74,25 @@ def test_duplicate_plan_does_not_cancel_teleop():
     n._current_plan_id = "p1"
     SpotExecutorRos._process_action_sequence(n, SimpleNamespace(plan_id="p1"))
     assert n.teleop.cancels == []
+
+
+def test_incoming_plan_reserves_motion_before_worker_starts(monkeypatch):
+    from robot_executor_msgs.msg import ActionSequenceMsg
+    from spot_executor.teleop import TeleopController
+
+    class DeferredThread:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            pass  # Deliberately delay the worker to expose the handoff gap.
+
+    n, _ = node()
+    n.teleop = TeleopController(SimpleNamespace(), n.spot_executor)
+    monkeypatch.setattr(
+        "spot_tools_ros.spot_executor_ros.threading.Thread", DeferredThread
+    )
+    SpotExecutorRos._process_action_sequence(n, ActionSequenceMsg(plan_id="new"))
+    assert n.spot_executor.processing_action_sequence
+    assert not n.teleop.cmd_vel(0.3, 0.0, 0.0)[0]
+    assert not n.teleop.sit()[0]
