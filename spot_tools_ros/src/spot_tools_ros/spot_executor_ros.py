@@ -551,8 +551,7 @@ class SpotExecutorRos(Node):
         assert goal_tolerance > 0
         self.get_logger().info(f"{goal_tolerance=}")
         self.declare_parameter("follow_timeout_per_meter", 6.0)
-        follow_timeout_per_meter = self.get_parameter(
-            "follow_timeout_per_meter").value
+        follow_timeout_per_meter = self.get_parameter("follow_timeout_per_meter").value
         assert follow_timeout_per_meter > 0
 
         # Pick/Inspect Skill
