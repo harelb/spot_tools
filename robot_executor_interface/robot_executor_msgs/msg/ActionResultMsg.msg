@@ -1,4 +1,4 @@
-# Result of ONE executed action within a dispatched sequence (PR B5):
+# Result of ONE executed action within a dispatched sequence:
 # the executor -> planner return channel. Published by the executor node
 # (~/action_result) as each action of an ActionSequenceMsg completes, is
 # retried out, or is pre-empted; consumed by omniplanner's robot adaptors.
