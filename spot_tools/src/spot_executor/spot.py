@@ -1,5 +1,6 @@
 import logging
 import math
+import threading
 import time
 
 import bosdyn.client.util
@@ -39,6 +40,7 @@ class Spot:
         semantic_name_to_id=None,
         labelspace_map=None,
     ):
+        self._lease_lock = threading.RLock()
         self.is_fake = False
         self.verbose = verbose
         bosdyn.client.util.setup_logging(verbose)
@@ -248,22 +250,24 @@ class Spot:
         self.estop_client.get_status()
 
     def aquire_lease(self):
-        self.lease = self.lease_client.acquire()
-        self.lease_keep_alive = bosdyn.client.lease.LeaseKeepAlive(
-            self.lease_client, warnings=False
-        )
-        self.lease_client.list_leases()
+        with self._lease_lock:
+            self.lease = self.lease_client.acquire()
+            self.lease_keep_alive = bosdyn.client.lease.LeaseKeepAlive(
+                self.lease_client, warnings=False
+            )
+            self.lease_client.list_leases()
 
     def take_lease(self):
-        self.lease_client.take()
-        if self.lease_keep_alive is not None:
-            # a second take (lease manager / operator) must not leave the old
-            # keep-alive thread running alongside the new one
-            self.lease_keep_alive.shutdown()
-        self.lease_keep_alive = bosdyn.client.lease.LeaseKeepAlive(
-            self.lease_client, warnings=False
-        )
-        self.lease_client.list_leases()
+        with self._lease_lock:
+            self.lease_client.take()
+            if self.lease_keep_alive is not None:
+                # a second take (lease manager / operator) must not leave the old
+                # keep-alive thread running alongside the new one
+                self.lease_keep_alive.shutdown()
+            self.lease_keep_alive = bosdyn.client.lease.LeaseKeepAlive(
+                self.lease_client, warnings=False
+            )
+            self.lease_client.list_leases()
 
     def power_on(self):
         """
