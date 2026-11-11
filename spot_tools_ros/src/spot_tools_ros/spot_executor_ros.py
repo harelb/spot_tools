@@ -648,6 +648,7 @@ class SpotExecutorRos(Node):
         )
         self.feedback_collector.compress_manipulation_requests = bool(
             compress_manipulation_requests
+        )
         self.declare_parameter("holding_service_wait_s", 3.0)
         self.declare_parameter("holding_service_call_timeout_s", 5.0)
         self.declare_parameter("holding_service_attempts", 3)
