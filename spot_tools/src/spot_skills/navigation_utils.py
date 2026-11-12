@@ -16,6 +16,8 @@ from bosdyn.client.frame_helpers import (
 from bosdyn.client.robot_command import RobotCommandBuilder, RobotCommandClient
 from numpy.typing import ArrayLike
 
+from spot_skills.event_log import emit
+
 # Global constants to define spot motion speed
 MAX_LINEAR_VEL = 0.75
 MAX_ROTATION_VEL = 0.65
@@ -130,6 +132,9 @@ def follow_trajectory_continuous(
     feedback=None,
     cancel_cb=None,
     pause_cb=None,
+    outcome=None,
+    stall_window_s: float = 15.0,
+    stall_min_progress_m: float = 0.25,
 ) -> bool:
     """
     Follows a trajectory by commanding the robot to move to each waypoint in the specified frame.
@@ -140,6 +145,12 @@ def follow_trajectory_continuous(
         robot_state_client (RobotStateClient): Client for receiving robot state.
         occupancy_grid_subscriber (Union[spot_ros_utils.OccupancyGridSubscriber, None], optional): Subscriber for occupancy grid updates. Defaults to None.
         stairs (bool, optional): Flag indicating whether the robot is navigating stairs. Defaults to False.
+        outcome (dict, optional): filled with ``reason`` (reached, timeout,
+            cancelled, lease_invalidated) for the caller's event log.
+    Events (through ``feedback.event`` when present): follow.progress every
+    2 s, follow.timeout, follow.stall (distance to the end has not shrunk by
+    ``stall_min_progress_m`` in ``stall_window_s``; logging only) and
+    mlp.replan when the mid-level planner starts or stops failing.
     Returns:
         bool: True if the trajectory is successfully followed, False otherwise.
     """
@@ -149,6 +160,12 @@ def follow_trajectory_continuous(
     end_pt = waypoints_list[-1, :2]
     t0 = time.time()
     rate = 10
+    if outcome is None:
+        outcome = {}
+    outcome["reason"] = "running"
+    last_progress_t = None
+    stall_best, stall_since, stalled = None, time.time(), False
+    mlp_failing = False
     # TODO: reactive loop, yeild out the loop to get info
     while 1:
         # Pause support: stop motion but keep this loop alive so we can resume.
@@ -163,6 +180,7 @@ def follow_trajectory_continuous(
             while pause_cb() and (cancel_cb is None or cancel_cb()):
                 time.sleep(1 / rate)
             t0 += time.time() - pause_start
+            stall_since = time.time()
 
         if cancel_cb is not None and not cancel_cb():
             # External caller requested cancellation; try to stop motion and exit early.
@@ -170,6 +188,7 @@ def follow_trajectory_continuous(
                 spot.stop()
             except Exception as ex:
                 feedback.print("WARNING", f"Failed to stop Spot while cancelling: {ex}")
+            outcome["reason"] = "cancelled"
             return False
 
         curr_time = time.time()
@@ -179,6 +198,16 @@ def follow_trajectory_continuous(
             # TODO: Also, we should probably have a finer-grained
             # check about making progress
             feedback.print("INFO", "follow_trajectory_continuous timeout")
+            outcome["reason"] = "timeout"
+            emit(
+                feedback,
+                "follow.timeout",
+                {
+                    "elapsed_s": round(curr_time - t0, 2),
+                    "timeout_s": round(float(timeout), 2),
+                    "dist_to_end": outcome.get("dist_to_end"),
+                },
+            )
             return False
 
         # if mid_level_planner is not None:
@@ -207,12 +236,25 @@ def follow_trajectory_continuous(
                 "INFO", "Mid-level planner failed, following high-level path directly"
             )
             path = shapely.LineString(waypoints_list[:, :2])
+        if bool(not mlp_success) != mlp_failing:
+            mlp_failing = not mlp_success
+            emit(
+                feedback,
+                "mlp.replan",
+                {
+                    "reason": "mlp_failed_following_direct_path"
+                    if mlp_failing
+                    else "mlp_recovered"
+                },
+            )
 
         tform_body_in_vision = spot.get_pose()
         distance_from_end = np.linalg.norm(
             end_pt - np.array([tform_body_in_vision[0], tform_body_in_vision[1]])
         )
+        outcome["dist_to_end"] = round(float(distance_from_end), 3)
         if distance_from_end < goal_tolerance:
+            outcome["reason"] = "reached"
             feedback.print("INFO", "Spot reached end of path")
             endpoint = math_helpers.SE2Pose(
                 x=tform_body_in_vision[0],
@@ -240,6 +282,34 @@ def follow_trajectory_continuous(
             # TODO: new function for MLP
             feedback.path_following_progress_feedback(progress_point, target_point)
 
+        now = time.time()
+        if last_progress_t is None or now - last_progress_t >= 2.0:
+            last_progress_t = now
+            length = float(path.length)
+            emit(
+                feedback,
+                "follow.progress",
+                {
+                    "frac": round(float(progress_distance) / length, 3)
+                    if length > 0
+                    else 1.0,
+                    "dist_left": round(max(length - float(progress_distance), 0.0), 3),
+                    "dist_to_end": outcome["dist_to_end"],
+                },
+            )
+        if stall_best is None or distance_from_end < stall_best - stall_min_progress_m:
+            stall_best, stall_since, stalled = distance_from_end, now, False
+        elif not stalled and now - stall_since > stall_window_s:
+            stalled = True
+            emit(
+                feedback,
+                "follow.stall",
+                {
+                    "since_s": round(now - stall_since, 1),
+                    "dist_to_end": outcome["dist_to_end"],
+                },
+            )
+
         # 3. send command
         current_waypoint = math_helpers.SE2Pose(
             x=target_point.x, y=target_point.y, angle=yaw_angle
@@ -248,6 +318,7 @@ def follow_trajectory_continuous(
 
         if feedback is not None and not feedback.plan_valid:
             feedback.print("INFO", "Plan invalidated by lease change, exiting follow")
+            outcome["reason"] = "lease_invalidated"
             return False
 
         navigate_to_absolute_pose(spot, current_waypoint, frame_name, stairs=stairs)
@@ -258,6 +329,7 @@ def follow_trajectory_continuous(
                 spot.stop()
             except Exception as ex:
                 feedback.print("WARNING", f"Failed to stop Spot while cancelling: {ex}")
+            outcome["reason"] = "cancelled"
             return False
 
         time.sleep(1 / rate)
