@@ -16,6 +16,7 @@ from robot_executor_interface.action_descriptions import (
 from scipy.spatial.transform import Rotation
 
 from spot_skills.arm_utils import gaze_at_vision_pose
+from spot_skills.event_log import emit
 from spot_skills.grasp_utils import object_grasp, object_place, stow_arm
 from spot_skills.navigation_utils import (
     follow_trajectory_continuous,
@@ -44,6 +45,37 @@ def _report_action_result(feedback, command, action_index, status, detail=""):
             pass  # feedback is unavailable; preserve the execution outcome
 
 
+OUR_LEASE_PREFIX = "understanding"
+
+
+def _action_target(command):
+    """Small JSON-able description of where/what an action is aimed at."""
+    try:
+        if isinstance(command, Follow):
+            path = np.asarray(command.path2d)
+            end = path[-1].tolist() if len(path) else None
+            return {"frame": command.frame, "end": end, "n_waypoints": len(path)}
+        if isinstance(command, Gaze):
+            return {
+                "frame": command.frame,
+                "gaze_point": np.asarray(command.gaze_point).tolist(),
+            }
+        if isinstance(command, Pick):
+            return {
+                "object_id": command.object_id,
+                "object_class": command.object_class,
+            }
+        if isinstance(command, Place):
+            return {
+                "object_id": command.object_id,
+                "object_class": command.object_class,
+                "object_point": np.asarray(command.object_point).tolist(),
+            }
+    except Exception as e:  # noqa: BLE001 -- descriptive only
+        return {"error": repr(e)}
+    return {}
+
+
 def transform_command_frame(tf_trans, tf_q, command, feedback=None):
     # command is Nx3 numpy array
 
@@ -64,10 +96,13 @@ def transform_command_frame(tf_trans, tf_q, command, feedback=None):
 # The lease manager should run in a separate thread to handle the exchange
 # of the lease e.g., when the tablet takes control of the robot.
 class LeaseManager:
-    def __init__(self, spot_interface, feedback=None):
+    def __init__(self, spot_interface, feedback=None, plan_id_fn=None):
         self.spot_interface = spot_interface
         self.monitoring_thread = None
         self.feedback = feedback
+        # Event-log context: the plan running when the lease changes hands.
+        self.plan_id_fn = plan_id_fn
+        self._seen_owner = None
 
         self.initialize_thread()
         self.taking_back_lease = False
@@ -90,51 +125,96 @@ class LeaseManager:
         before = self.current_owner_name()
         if self.feedback is not None:
             self.feedback.log_lease_takeover(f"operator_takes_lease_from:{before}")
+        self._intervention("operator_takes", before)
         self.spot_interface.take_lease()
         after = self.current_owner_name()
         self.owner_name = after
         return before, after
 
+    def _plan_id(self):
+        try:
+            return (self.plan_id_fn() if self.plan_id_fn is not None else "") or ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _intervention(self, kind, owner):
+        plan_id = self._plan_id()
+        emit(
+            self.feedback,
+            "lease.intervention",
+            {"kind": kind, "owner": owner, "plan_id": plan_id},
+            plan_id=plan_id,
+        )
+
+    def _note_owner(self, owner_name):
+        """Event-log every owner change the monitor sees (tablet client names
+        included). A foreign, non-empty owner taking over is a manual
+        intervention."""
+        previous = getattr(self, "_seen_owner", None)
+        if owner_name == previous:
+            return
+        self._seen_owner = owner_name
+        emit(
+            self.feedback,
+            "lease.owner",
+            {
+                "owner": owner_name,
+                "previous": previous,
+                "ours": owner_name.startswith(OUR_LEASE_PREFIX),
+            },
+        )
+        if (
+            previous is not None
+            and owner_name != ""
+            and not owner_name.startswith(OUR_LEASE_PREFIX)
+        ):
+            self._intervention("manual", owner_name)
+
+    def poll_once(self):
+        """One pass of the lease monitor (the thread calls this every 0.1 s)."""
+        leases = self.spot_interface.lease_client.list_leases()
+
+        # owner of the full lease
+        self.owner = leases[0].lease_owner
+        self.owner_name = self.owner.client_name
+        self._note_owner(self.owner_name)
+
+        # If someone else owns the lease, the current plan is invalid
+        # since the robot may be moved.
+        if not self.owner_name.startswith("understanding"):
+            if self.feedback is not None:
+                self.feedback.plan_valid = False
+
+        # If nobody owns the lease, then the owner string is empty.
+        # We should try to take the lease back in that case.
+        if self.owner_name == "":
+            # We should set the feedback's break_out_of_waiting_loop to True
+            # so that the pick skill gets immediately cancelled if it is running.
+            if self.feedback is not None:
+                self.feedback.break_out_of_waiting_loop = True
+
+            self.taking_back_lease = True
+            try:
+                self._take_back_lease()
+            except Exception as e:  # noqa: BLE001
+                # e.g. NotPoweredOnError while the robot is off: the thread
+                # must survive and clear the flag, or every plan waits on
+                # taking_back_lease forever.
+                if self.feedback is not None:
+                    self.feedback.print(
+                        "WARNING",
+                        f"LEASE MANAGER THREAD: could not take the lease back: {e!r}",
+                    )
+            finally:
+                time.sleep(1)
+                if self.feedback is not None:
+                    self.feedback.break_out_of_waiting_loop = False
+                self.taking_back_lease = False
+
     def initialize_thread(self):
         def monitor_lease():
             while True:
-                leases = self.spot_interface.lease_client.list_leases()
-
-                # owner of the full lease
-                self.owner = leases[0].lease_owner
-                self.owner_name = self.owner.client_name
-
-                # If someone else owns the lease, the current plan is invalid
-                # since the robot may be moved.
-                if not self.owner_name.startswith("understanding"):
-                    if self.feedback is not None:
-                        self.feedback.plan_valid = False
-
-                # If nobody owns the lease, then the owner string is empty.
-                # We should try to take the lease back in that case.
-                if self.owner_name == "":
-                    # We should set the feedback's break_out_of_waiting_loop to True
-                    # so that the pick skill gets immediately cancelled if it is running.
-                    if self.feedback is not None:
-                        self.feedback.break_out_of_waiting_loop = True
-
-                    self.taking_back_lease = True
-                    try:
-                        self._take_back_lease()
-                    except Exception as e:  # noqa: BLE001
-                        # e.g. NotPoweredOnError while the robot is off: the thread
-                        # must survive and clear the flag, or every plan waits on
-                        # taking_back_lease forever.
-                        if self.feedback is not None:
-                            self.feedback.print(
-                                "WARNING",
-                                f"LEASE MANAGER THREAD: could not take the lease back: {e!r}",
-                            )
-                    finally:
-                        time.sleep(1)
-                        if self.feedback is not None:
-                            self.feedback.break_out_of_waiting_loop = False
-                        self.taking_back_lease = False
+                self.poll_once()
                 time.sleep(0.1)
 
         self.monitoring_thread = threading.Thread(target=monitor_lease, daemon=False)
@@ -148,6 +228,7 @@ class LeaseManager:
                 "LEASE MANAGER THREAD: Trying to take lease back, since nobody owns it.",
             )
             self.feedback.log_lease_takeover("spot_executor_takes_lease")
+        self._intervention("executor_takes", "")
         self.spot_interface.take_lease()
         try:
             stow_arm(self.spot_interface)
@@ -226,9 +307,14 @@ class SpotExecutor:
             raise ValueError("follow_timeout_per_meter must be positive")
 
         self.lease_manager = None
+        self.last_follow_outcome = None
+        # plan_id of the sequence being executed ("" when idle), for events.
+        self.active_plan_id = ""
 
     def initialize_lease_manager(self, feedback):
-        self.lease_manager = LeaseManager(self.spot_interface, feedback)
+        self.lease_manager = LeaseManager(
+            self.spot_interface, feedback, plan_id_fn=lambda: self.active_plan_id
+        )
 
     def _stop_robot(self, feedback):
         """Halt Spot where it is, without powering it on or standing it up.
@@ -299,6 +385,49 @@ class SpotExecutor:
         with self._pause_lock:
             self.paused = False
 
+        plan_id = getattr(sequence, "plan_id", "") or ""
+        self.active_plan_id = plan_id
+        n_actions = len(sequence.actions)
+        end_reason = "completed"
+        action_t0 = None
+
+        def action_event(etype, i, cmd, **payload):
+            emit(
+                feedback,
+                etype,
+                {
+                    "plan_id": plan_id,
+                    "i": i,
+                    "n": n_actions,
+                    "type": type(cmd).__name__.upper(),
+                    **payload,
+                },
+                plan_id=plan_id,
+            )
+
+        def action_end(i, cmd, ok, reason):
+            duration = None if action_t0 is None else time.monotonic() - action_t0
+            action_event(
+                "action.end",
+                i,
+                cmd,
+                ok=bool(ok),
+                reason=reason,
+                duration_s=None if duration is None else round(duration, 3),
+            )
+
+        emit(
+            feedback,
+            "sequence.start",
+            {
+                "plan_id": plan_id,
+                "robot": getattr(sequence, "robot_name", "") or "",
+                "n": n_actions,
+                "types": [type(c).__name__.upper() for c in sequence.actions],
+            },
+            plan_id=plan_id,
+        )
+
         ix = 0
         try:
             feedback.print("INFO", "Would like to execute: ")
@@ -345,6 +474,7 @@ class SpotExecutor:
                 command = sequence.actions[ix]
 
                 if not self.keep_going:
+                    end_reason = "preempted"
                     feedback.print("INFO", "Action sequence was pre-empted.")
                     _report_action_result(
                         feedback,
@@ -383,6 +513,7 @@ class SpotExecutor:
                                 f"Gave up after waiting {waited:.0f} s on: "
                                 f"{'; '.join(blocked)}. Stopping this plan.",
                             )
+                            end_reason = "wait_timeout"
                             break
                         if now - warned_at > 30.0:
                             feedback.print(
@@ -400,6 +531,15 @@ class SpotExecutor:
 
                 success = False
                 feedback.plan_valid = True
+                self.last_follow_outcome = None
+                action_t0 = time.monotonic()
+                action_event(
+                    "action.start",
+                    ix,
+                    command,
+                    target=_action_target(command),
+                    attempt=inner_loop_attempts + 1,
+                )
                 try:
                     if type(command) is Follow:
                         success = self.execute_follow(command, feedback)
@@ -422,6 +562,16 @@ class SpotExecutor:
                         raise Exception(
                             f"SpotExecutor received unknown command type {type(command)}"
                         )
+                    follow_reason = (self.last_follow_outcome or {}).get("reason")
+                    if success:
+                        end_why = "success"
+                    elif inner_loop_attempts > 1:
+                        end_why = "failed_gave_up"
+                    else:
+                        end_why = "failed_retrying"
+                    if follow_reason and not success:
+                        end_why = f"{end_why}:{follow_reason}"
+                    action_end(ix, command, success, end_why)
                     if success or inner_loop_attempts > 1:
                         # The action is being advanced past: either it
                         # succeeded, or it exhausted its retries (advanced
@@ -452,6 +602,7 @@ class SpotExecutor:
                             )
                             self.keep_going = False
                             self._stop_robot(feedback)
+                            end_reason = "task_failed"
                             break
                         # A task spans several actions (a relocation is a pick,
                         # a carry and a place); it is finished once the next
@@ -476,11 +627,27 @@ class SpotExecutor:
                         time.sleep(1)
 
                 except LeaseUseError:
+                    action_end(ix, command, False, "lease_lost")
                     feedback.print("INFO", "Lost lease, stopping action sequence.")
                     feedback.log_lease_takeover("manual_intervention")
+                    owner = getattr(self.lease_manager, "owner_name", "") or ""
+                    emit(
+                        feedback,
+                        "lease.intervention",
+                        {
+                            "kind": "manual",
+                            "owner": owner,
+                            "plan_id": plan_id,
+                            "detected_by": "lease_use_error",
+                        },
+                        plan_id=plan_id,
+                    )
                     # Wait until the lease manager has taken the lease back
                     time.sleep(2)
-                except Exception:
+                except Exception as ex:
+                    action_end(
+                        ix, command, False, f"exception:{type(ex).__name__}: {ex}"
+                    )
                     # The sequence is aborted: report the action as failed, so
                     # whatever planned it hears now rather than never.
                     report = getattr(feedback, "report_action_done", None)
@@ -497,9 +664,28 @@ class SpotExecutor:
                     "FAILED",
                     f"{type(ex).__name__}: {ex}",
                 )
+            emit(
+                feedback,
+                "sequence.end",
+                {
+                    "plan_id": plan_id,
+                    "reason": f"exception:{type(ex).__name__}",
+                    "completed": ix,
+                    "n": n_actions,
+                },
+                plan_id=plan_id,
+            )
+            self.active_plan_id = ""
             self.processing_action_sequence = False
             raise
 
+        emit(
+            feedback,
+            "sequence.end",
+            {"plan_id": plan_id, "reason": end_reason, "completed": ix, "n": n_actions},
+            plan_id=plan_id,
+        )
+        self.active_plan_id = ""
         self.processing_action_sequence = False
 
     def execute_gaze(self, command, feedback, pick_next=False):
@@ -685,6 +871,7 @@ class SpotExecutor:
                     command_to_send[-1],
                 )
         else:
+            self.last_follow_outcome = {}
             ret = follow_trajectory_continuous(
                 self.spot_interface,
                 command_to_send,
@@ -695,5 +882,6 @@ class SpotExecutor:
                 feedback=feedback,
                 cancel_cb=lambda: self.keep_going,
                 pause_cb=lambda: self.paused,
+                outcome=self.last_follow_outcome,
             )
         return ret

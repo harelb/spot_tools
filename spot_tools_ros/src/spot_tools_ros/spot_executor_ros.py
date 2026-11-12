@@ -5,8 +5,8 @@ import threading
 import time
 import traceback
 
-import numpy as np
 import cv2
+import numpy as np
 import rclpy
 import rclpy.time
 import spot_executor as se
@@ -46,6 +46,13 @@ from spot_executor.teleop import HARD_MAX, TeleopController
 from spot_skills.approval import ApprovalDecision
 from spot_skills.depth_utils import encode_depth_png, encode_jpeg
 from spot_skills.detection_utils import YOLODetector
+from spot_skills.event_log import (
+    EventLog,
+    component_dir,
+    emit,
+    events_path,
+    open_append_log,
+)
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
 from visualization_msgs.msg import Marker, MarkerArray
@@ -160,8 +167,17 @@ class RosFeedbackCollector:
         self.holding_service_attempts = 3
         self.robot_name = ""
 
+        # Under the run dir when run-adt4 set one (never reused), else the
+        # output_dir parameter as before.
+        output_dir = component_dir("spot_executor", output_dir)
         self.output_dir = output_dir
         self.log_to_file_level = log_to_file_level
+        # Mission event log (events/spot_executor.jsonl); best-effort, see
+        # spot_skills/event_log.py. Robot name, clock and warn are filled in by
+        # register_publishers once there is a node.
+        self.event_log = EventLog(
+            events_path("spot_executor", output_dir), "spot_executor"
+        )
         # Per-pick episode log (operator requests/answers + executor messages);
         # see grasp_episode_log.py. The answer message is kept for it.
         self.episode_log = (
@@ -172,10 +188,12 @@ class RosFeedbackCollector:
         self.pick_confirmation_msg = None
 
         if log_to_file_level != "":
-            os.makedirs(self.output_dir, exist_ok=True)
-            self.str_log_file = os.path.join(self.output_dir, "str_log.txt")
-            with open(self.str_log_file, "w") as f:
-                f.write("time - level - message\n")
+            # Appended, never truncated: a restarted node keeps the earlier
+            # runs' lines after a "# start <iso> pid <pid>" marker.
+            self.str_log_file = open_append_log(
+                os.path.join(self.output_dir, "str_log.txt"),
+                "time - level - message",
+            )
 
             match log_to_file_level:
                 case "DEBUG":
@@ -414,7 +432,10 @@ class RosFeedbackCollector:
         # its own line.
         message = str(string)
         if self.episode_log is not None:
+            episode_dir = self.episode_log.directory
             self.episode_log.message(level, message)
+            if episode_dir is not None and self.episode_log.directory is None:
+                self._grasp_episode_event(episode_dir, message)
         match level:
             case "DEBUG":
                 self.logger.debug(message)
@@ -445,6 +466,35 @@ class RosFeedbackCollector:
     def feedback_viz_2(self, y):
         pass
 
+    def event(self, etype, payload=None, plan_id=None, goal_id=None):
+        """Mission event hook (spot_skills.event_log.emit); never raises."""
+        log = getattr(self, "event_log", None)
+        if log is None:
+            return False
+        # Events without an explicit plan_id (follow.progress, guards, ...)
+        # carry the plan of the sequence being executed, if any.
+        if etype == "sequence.start":
+            log.set_context(plan_id=plan_id or "")
+        ok = log.emit(etype, payload, plan_id=plan_id, goal_id=goal_id)
+        if etype == "sequence.end":
+            log.set_context(plan_id="")
+        return ok
+
+    def _grasp_episode_event(self, episode_dir, message):
+        try:
+            outcome = message.split(":", 1)[1].strip() if ":" in message else ""
+            self.event(
+                "grasp.episode",
+                {
+                    "dir": episode_dir,
+                    "rel": os.path.relpath(episode_dir, self.output_dir),
+                    "ok": outcome == "True",
+                    "outcome": outcome,
+                },
+            )
+        except Exception:  # noqa: BLE001 -- logging only
+            pass
+
     def action_result(self, command, action_index, status, detail=""):
         """Publish one action's outcome. Called by
         SpotExecutor._report_action_result; must never raise into the
@@ -468,6 +518,10 @@ class RosFeedbackCollector:
             self.episode_log.warn = self.logger.warning
         self._clock = node.get_clock()
         self.robot_name = node.get_namespace().strip("/") or node.get_name()
+        clock = self._clock
+        self.event_log.warn = self.logger.warning
+        self.event_log.robot = self.event_log.robot or self.robot_name
+        self.event_log.ros_time = lambda: clock.now().nanoseconds * 1e-9
 
         # ROS 2 transient local QoS for "latching" behavior
         latching_qos = QoSProfile(
@@ -544,9 +598,13 @@ class RosFeedbackCollector:
         if not os.path.exists(self.output_dir):
             self.logger.info(f"Making {self.output_dir}")
             os.makedirs(self.output_dir, exist_ok=True)
-        log_fn = os.path.join(self.output_dir, "lease_log.txt")
-        with open(log_fn, "w") as fo:
-            fo.write("time,event\n")
+        self.start_lease_log()
+
+    def start_lease_log(self):
+        """Append (never truncate) lease_log.txt with a start marker."""
+        return open_append_log(
+            os.path.join(self.output_dir, "lease_log.txt"), "time,event"
+        )
 
     def report_action_done(self, sequence, command, success):
         msg = ActionDoneMsg()
@@ -687,6 +745,43 @@ def take_lease_report(lease_manager) -> tuple[bool, str]:
     return ours, msg if ours else f"{msg} (not ours after take)"
 
 
+def node_event(node, etype, payload=None, plan_id=None):
+    """Mission event from the executor node via its feedback collector;
+    best-effort, a no-op for stand-ins without one."""
+    ids = {} if plan_id is None else {"plan_id": plan_id}
+    emit(getattr(node, "feedback_collector", None), etype, payload, **ids)
+
+
+def parse_mission_id(data: str) -> str:
+    """``/global/mission/current`` payload -> mission id ("" = no mission).
+
+    Accepts the console's JSON ``{"mission_id": ..., "state": ...}`` (a closed
+    mission, ``state`` ended/closed, maps to "") or a bare id string.
+    """
+    text = str(data or "").strip()
+    if not text.startswith("{"):
+        return text
+    try:
+        obj = json.loads(text)
+    except ValueError:
+        return ""
+    if str(obj.get("state", "")).lower() in ("ended", "closed", "end", "none"):
+        return ""
+    return str(obj.get("mission_id") or "")
+
+
+def guards_signature(guards: dict) -> dict:
+    """The part of a guard snapshot whose change is worth an event: all of it
+    except the battery percentage, which only counts in 10 % steps."""
+    sig = {k: v for k, v in guards.items() if k != "battery_percent"}
+    sig["faults"] = sorted(str(f) for f in guards.get("faults", []))
+    try:
+        sig["battery_band"] = int(float(guards.get("battery_percent", 0.0)) // 10) * 10
+    except (TypeError, ValueError):
+        sig["battery_band"] = None
+    return sig
+
+
 def resolve_spot_interface(spot_interface: str, use_fake_spot_interface: bool) -> str:
     """Back-compat resolution: explicit spot_interface wins; the legacy
     use_fake_spot_interface flag maps to 'fake'."""
@@ -807,6 +902,16 @@ class SpotExecutorRos(Node):
             self.get_parameter("holding_service_attempts").value
         )
         self.feedback_collector.register_publishers(self)
+        self._last_guards_sig = None
+
+        # Current mission id for the event log envelope: latched String from
+        # the console (JSON {"mission_id", "state", ...} or a bare id).
+        self.mission_sub = self.create_subscription(
+            String,
+            "/global/mission/current",
+            self.handle_mission_current,
+            QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL),
+        )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -1083,6 +1188,16 @@ class SpotExecutorRos(Node):
 
         self.setup_teleop()
 
+    def handle_mission_current(self, msg):
+        try:
+            mission_id = parse_mission_id(msg.data)
+            log = self.feedback_collector.event_log
+            if mission_id != log.mission_id:
+                log.set_context(mission_id=mission_id)
+                node_event(self, "mission.current", {"mission_id": mission_id})
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warning(f"mission/current: {e}")
+
     def _publish_plan_progress(self, plan_id, robot_name, task_id, state):
         msg = PlanProgressMsg()
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -1163,6 +1278,15 @@ class SpotExecutorRos(Node):
 
     def _posture_service(self, fn, response):
         response.success, response.message = fn()
+        node_event(
+            self,
+            "teleop",
+            {
+                "state": getattr(fn, "__name__", "posture"),
+                "ok": bool(response.success),
+                "message": response.message,
+            },
+        )
         self.publish_teleop_state(refresh_standing=True)
         return response
 
@@ -1172,6 +1296,8 @@ class SpotExecutorRos(Node):
         self.teleop.tick()
         self._teleop_state_tick += 1
         active = self.teleop.active
+        if active != self._teleop_was_active:
+            node_event(self, "teleop", {"state": "active" if active else "idle"})
         every = 4 if active else 20
         if active != self._teleop_was_active or self._teleop_state_tick % every == 0:
             self.publish_teleop_state(
@@ -1236,6 +1362,13 @@ class SpotExecutorRos(Node):
         msg.lease_owner = str(guards["lease_owner"])
         msg.faults = [str(f) for f in guards["faults"]]
         msg.notes = self.status_str
+        try:
+            sig = guards_signature(guards)
+            if sig != self._last_guards_sig:
+                self._last_guards_sig = sig
+                node_event(self, "guards", dict(guards))
+        except Exception:  # noqa: BLE001 -- logging only
+            pass
         teleop = getattr(self, "teleop", None)
         if teleop is not None:
             msg.notes = f"{self.status_str}; {teleop.notes(self._teleop_standing)}"
@@ -1248,6 +1381,11 @@ class SpotExecutorRos(Node):
             response.message = "no lease manager (executor not initialized)"
             return response
         response.success, response.message = take_lease_report(lease_manager)
+        node_event(
+            self,
+            "op.take_lease",
+            {"ok": bool(response.success), "message": response.message},
+        )
         log = self.get_logger().info if response.success else self.get_logger().error
         log(f"take_lease: {response.message}")
         return response
@@ -1255,11 +1393,13 @@ class SpotExecutorRos(Node):
     def handle_pause(self, msg: Bool):
         if msg.data:
             self.get_logger().info("Received external pause request.")
+            node_event(self, "pause", {"source": "external"})
             self.spot_executor.set_paused(True, self.feedback_collector)
 
     def handle_resume(self, msg: Bool):
         if msg.data:
             self.get_logger().info("Received external resume request.")
+            node_event(self, "resume", {"source": "external"})
             if self.spot_executor.processing_action_sequence:
                 # the plan takes the robot back
                 with self.teleop.plan_control("plan resumed"):
@@ -1268,6 +1408,7 @@ class SpotExecutorRos(Node):
                 self.spot_executor.set_paused(False, self.feedback_collector)
 
     def handle_stop(self, msg: Bool):
+        node_event(self, "stop", {"source": "external", "data": bool(msg.data)})
         # Operator stop also ends teleop and halts the robot (lease permitting).
         self.teleop.cancel("stop requested", force_stop=True)
         # Best-effort hard stop of the current action sequence, if any.
@@ -1316,8 +1457,24 @@ class SpotExecutorRos(Node):
                     self.get_logger().info(
                         f"Preempting current plan (plan_id={self._current_plan_id}) with new plan (plan_id={msg.plan_id})"
                     )
+                    node_event(
+                        self,
+                        "plan.preempted",
+                        {"plan_id": self._current_plan_id, "by": msg.plan_id},
+                        plan_id=self._current_plan_id or "",
+                    )
                     self.spot_executor.terminate_sequence(self.feedback_collector)
                 self._current_plan_id = msg.plan_id
+                node_event(
+                    self,
+                    "plan.received",
+                    {
+                        "plan_id": msg.plan_id,
+                        "robot": msg.robot_name,
+                        "n": len(msg.actions),
+                    },
+                    plan_id=msg.plan_id,
+                )
 
                 self.spot_executor.processing_action_sequence = True
                 self.spot_executor.paused = False
