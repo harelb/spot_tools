@@ -1,4 +1,4 @@
-"""Follow actions the GRSTAPS-X plans produce: a leg that is one waypoint (the
+"""Follow edge cases: a leg that is one waypoint (the
 robot's next task is where it stands), and an action that raises."""
 
 from types import SimpleNamespace
