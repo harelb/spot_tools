@@ -192,18 +192,68 @@ def _collate_transforms(msgs):
     return transform_map
 
 
+# Spot image sources are "<camera>_<suffix>". Body cameras (frontleft, frontright,
+# left, right, back) share the defaults; the arm's hand camera has its own names
+# and sensor frame.
+BODY_CAMERA_DEFAULTS = {
+    "color_suffix": "fisheye_image",
+    "depth_suffix": "depth_in_visual_frame",
+    "frame_id": "",  # "" -> the camera name
+}
+CAMERA_DEFAULTS = {
+    "hand": {
+        "color_suffix": "color_image",
+        "depth_suffix": "depth_in_hand_color_frame",
+        "frame_id": "hand_color_image_sensor",
+    },
+}
+
+
+def camera_defaults(name):
+    """Default color/depth source suffixes and frame for a Spot camera name."""
+    return {**BODY_CAMERA_DEFAULTS, **CAMERA_DEFAULTS.get(name, {})}
+
+
+def missing_sources(sources, available):
+    """Sources (in order) that the robot's image service does not list."""
+    return [x for x in sources if x not in available]
+
+
+# Cameras requested even without subscribers: the image responses carry the
+# transform snapshots that publish each camera's (static) frames, and ADT4's
+# platform calibration hangs the ZED off <robot>/frontleft, so those frames must
+# exist even when nobody reads the Spot images themselves.
+ALWAYS_REQUEST = ["frontleft", "frontright"]
+
+
+def active_cameras(names, has_subscribers, always=()):
+    """Cameras (in ``names`` order) to request this cycle.
+
+    ``has_subscribers`` maps camera name -> whether any of its color (raw or
+    compressed), depth or camera_info topics has a subscriber; cameras in
+    ``always`` are requested regardless.
+    """
+    always = set(always)
+    return [n for n in names if n in always or has_subscribers.get(n, False)]
+
+
 class CameraPublisher:
     """Publisher for a single camera."""
 
     def __init__(self, node, name, tf_prefix):
         self.name = name
         self.tf_prefix = tf_prefix
+        defaults = camera_defaults(name)
         self.color_suffix = _get_param(
-            node, f"{name}.color_suffix", "fisheye_image"
+            node, f"{name}.color_suffix", defaults["color_suffix"]
         ).string_value
         self.depth_suffix = _get_param(
-            node, f"{name}.depth_suffix", "depth_in_visual_frame"
+            node, f"{name}.depth_suffix", defaults["depth_suffix"]
         ).string_value
+        self.frame_id = (
+            _get_param(node, f"{name}.frame_id", defaults["frame_id"]).string_value
+            or name
+        )
 
         param = node.declare_parameter(f"{name}.quality", 100.0)
         self.quality = param.get_parameter_value().double_value
@@ -211,6 +261,19 @@ class CameraPublisher:
         param = node.declare_parameter(f"{name}.use_compressed", True)
         self.use_compressed = param.get_parameter_value().bool_value
 
+    @property
+    def color_source(self):
+        return f"{self.name}_{self.color_suffix}"
+
+    @property
+    def depth_source(self):
+        return f"{self.name}_{self.depth_suffix}"
+
+    def sources(self):
+        return [self.color_source, self.depth_source]
+
+    def create_publishers(self, node):
+        name = self.name
         color_topic = f"{name}/color/image_raw"
         depth_topic = f"{name}/depth/image_rect"
         color_info_topic = f"{name}/color/camera_info"
@@ -245,11 +308,12 @@ class CameraPublisher:
         }
 
         return [
-            build_image_request(f"{self.name}_{self.color_suffix}", **rgb_kwargs),
-            build_image_request(f"{self.name}_{self.depth_suffix}", **depth_kwargs),
+            build_image_request(self.color_source, **rgb_kwargs),
+            build_image_request(self.depth_source, **depth_kwargs),
         ]
 
-    def _has_work(self):
+    def has_subscribers(self):
+        """Any subscriber on this camera's color (as published), depth or info."""
         return (
             self._rgb_pub.get_subscription_count() > 0
             or self._rgb_info_pub.get_subscription_count() > 0
@@ -258,7 +322,7 @@ class CameraPublisher:
         )
 
     def publish(self, logger, robot, color, depth):
-        if not self._has_work():
+        if not self.has_subscribers():
             return
 
         color_stamp = _get_local_time(robot, color.shot.acquisition_time)
@@ -266,7 +330,7 @@ class CameraPublisher:
             return  # skip previously published images
 
         self._last_time = color_stamp
-        frame_name = _prefix_frame(self.tf_prefix, self.name)
+        frame_name = _prefix_frame(self.tf_prefix, self.frame_id)
         header = _build_header(color_stamp, frame_name)
 
         rgb_msg = _build_image_msg(header, color.shot)
@@ -325,9 +389,31 @@ class SpotClientNode(Node):
         if len(self._tf_prefix) > 0 and self._tf_prefix[-1] == "/":
             self._tf_prefix = self._tf_prefix[:-2]
 
+        available = self._available_sources()
         self._cameras = {}
         for camera in names:
-            self._cameras[camera] = CameraPublisher(self, camera, self._tf_prefix)
+            cam = CameraPublisher(self, camera, self._tf_prefix)
+            missing = (
+                missing_sources(cam.sources(), available)
+                if available is not None
+                else []
+            )
+            if missing:
+                # e.g. "hand" on a Spot without an arm
+                self.get_logger().warning(
+                    f"Skipping camera '{camera}': robot has no image source(s) "
+                    f"{missing}"
+                )
+                continue
+
+            cam.create_publishers(self)
+            self._cameras[camera] = cam
+
+        self.get_logger().info(f"Publishing cameras {list(self._cameras)}")
+        # [""] (ROS has no empty string-array literal) means none
+        always = self._get_param("always_request", ALWAYS_REQUEST).string_array_value
+        self._always_request = [x for x in always if x]
+        self._active = None
 
         allowed_parents = ["vision", "odom", "body"]
         self._parent_frame = self._get_param("parent_frame", "vision").string_value
@@ -376,6 +462,16 @@ class SpotClientNode(Node):
 
     def _get_param(self, name, default):
         return _get_param(self, name, default)
+
+    def _available_sources(self):
+        """Names of the robot's image sources, or None if they can't be listed."""
+        try:
+            return set(x.name for x in self._image_client.list_image_sources())
+        except Exception as e:
+            self.get_logger().warning(
+                f"Cannot list image sources ({e}); requesting every camera"
+            )
+            return None
 
     def _connect(self):
         setup_logging = self._get_param("robot.setup_logging", True).bool_value
@@ -484,11 +580,23 @@ class SpotClientNode(Node):
 
     def _camera_callback(self):
         """Poll Spot for new image messages and publish."""
-        names = []
+        # Only cameras someone reads (plus ALWAYS_REQUEST): every requested source
+        # costs Spot image-service time and slows the cameras mapping depends on.
+        names = active_cameras(
+            list(self._cameras),
+            {n: cam.has_subscribers() for n, cam in self._cameras.items()},
+            self._always_request,
+        )
+        if names != self._active:
+            self.get_logger().info(f"Requesting cameras {names}")
+            self._active = names
+
         requests = []
-        for name, camera in self._cameras.items():
-            requests += camera.requests(self._use_grayscale)
-            names.append(name)
+        for name in names:
+            requests += self._cameras[name].requests(self._use_grayscale)
+
+        if not requests:
+            return
 
         try:
             responses = self._image_client.get_image(requests)
@@ -499,8 +607,8 @@ class SpotClientNode(Node):
             self.get_logger().warn("Failed to request image! Reverting to grayscale")
             self._use_grayscale = True
             return
-        except Exception:
-            self.get_logger().error("Image request failed: {e}")
+        except Exception as e:
+            self.get_logger().error(f"Image request failed: {e}")
             return
 
         for resp in responses:
