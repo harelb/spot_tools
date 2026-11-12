@@ -46,7 +46,7 @@ class FakeOccupancyPublisher(Node):
             try:
                 return get_tf_pose(self.tf_buffer, parent, child)
             except tf2_ros.TransformException as e:
-                self.get_logger.warn(f"Failed to get transform: {e}")
+                self.get_logger().warning(f"Failed to get transform: {e}")
 
         self.tf_lookup_fn = tf_lookup_fn  # TODO: use this to test transformation
 

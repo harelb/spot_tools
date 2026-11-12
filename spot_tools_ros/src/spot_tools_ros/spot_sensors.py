@@ -579,7 +579,7 @@ class SpotClientNode(Node):
         for joint in pos_state.joint_states:
             joint_name = JOINT_NAMES.get(joint.name)
             if joint_name is None:
-                self.get_logger.debug(f"unknown joint '{joint.name}'")
+                self.get_logger().debug(f"unknown joint '{joint.name}'")
                 continue
 
             prefixed_joint_name = _prefix_frame(self._tf_prefix, joint_name)

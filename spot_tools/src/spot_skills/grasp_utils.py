@@ -444,7 +444,6 @@ def object_grasp(
         max_acc=None,
         max_vel=None,
         disable_force_on_contact=False,
-        max_torque=20,
     )
     spot.command_client.robot_command(close_cmd)
     time.sleep(0.25)
