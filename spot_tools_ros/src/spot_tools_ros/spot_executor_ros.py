@@ -648,16 +648,6 @@ def take_lease_report(lease_manager) -> tuple[bool, str]:
     return ours, msg if ours else f"{msg} (not ours after take)"
 
 
-def resolve_spot_interface(spot_interface: str, use_fake_spot_interface: bool) -> str:
-    """Back-compat resolution: explicit spot_interface wins; the legacy
-    use_fake_spot_interface flag maps to 'fake'."""
-    if spot_interface not in ("", "real", "fake", "sim"):
-        raise ValueError(f"Invalid spot_interface: {spot_interface}")
-    if spot_interface:
-        return spot_interface
-    return "fake" if use_fake_spot_interface else "real"
-
-
 class SpotExecutorRos(Node):
     def __init__(self):
         super().__init__("spot_executor_ros")
@@ -671,8 +661,11 @@ class SpotExecutorRos(Node):
         self.declare_parameter("bosdyn_client_username", "")
         self.declare_parameter("bosdyn_client_password", "")
         spot_ip = self.get_parameter("spot_ip").value
+        assert spot_ip != ""
         bdai_username = self.get_parameter("bosdyn_client_username").value
+        assert bdai_username != ""
         bdai_password = self.get_parameter("bosdyn_client_password").value
+        assert bdai_password != ""
 
         # Follow Skill
         self.declare_parameter("follower_lookahead", 0.0)
@@ -768,11 +761,6 @@ class SpotExecutorRos(Node):
         # Robot Initialization
         self.declare_parameter("use_fake_spot_interface", False)
         use_fake_spot_interface = self.get_parameter("use_fake_spot_interface").value
-        self.declare_parameter("spot_interface", "")
-        self.declare_parameter("sim_rgb_topic", "")
-        interface = resolve_spot_interface(
-            self.get_parameter("spot_interface").value, use_fake_spot_interface
-        )
 
         # mid-level planner parameters
         self.declare_parameter("mid_level_planner_type", "identity")
@@ -833,7 +821,7 @@ class SpotExecutorRos(Node):
                     f"Invalid mid-level planner type {mid_level_planner_type}"
                 )
 
-        if interface == "fake":
+        if use_fake_spot_interface:
             self.declare_parameter("fake_spot_external_pose", False)
             external_pose = self.get_parameter("fake_spot_external_pose").value
 
@@ -872,30 +860,7 @@ class SpotExecutorRos(Node):
                 external_pose=external_pose,
             )
 
-        elif interface == "sim":
-            from dcist_sim_ros.sim_spot import SimSpot
-            from dcist_sim_ros.sim_spot_ros import SimSpotRos
-
-            # SimSpotRos provides get_pose_fn from TF; construct it first with
-            # a placeholder sim_spot and wire the back-reference afterward.
-            self.spot_ros_interface = SimSpotRos(
-                self,
-                None,
-                odom_frame,
-                body_frame,
-                rgb_topic=self.get_parameter("sim_rgb_topic").value,
-            )
-            self.spot_interface = SimSpot(
-                node=self,
-                robot_name=body_frame.split("/")[0],
-                get_pose_fn=self.spot_ros_interface.get_pose_fn,
-            )
-            self.spot_ros_interface.attach(self.spot_interface)
-
-        elif interface == "real":
-            assert spot_ip != ""
-            assert bdai_username != ""
-            assert bdai_password != ""
+        else:
             self.get_logger().info("About to initialize Spot")
             self.get_logger().info(f"{bdai_username=}, {bdai_password=}, {spot_ip=}")
             self.spot_interface = Spot(
@@ -903,9 +868,6 @@ class SpotExecutorRos(Node):
                 password=bdai_password,
                 ip=spot_ip,
             )
-
-        else:
-            raise ValueError(f"Unknown spot_interface: {interface}")
 
         self.get_logger().info("Initialized!")
         self.status_str = "Idle"
@@ -926,32 +888,9 @@ class SpotExecutorRos(Node):
 
         self.tf_lookup_fn = tf_lookup_fn  # TODO: use this to test transformation
 
-        self.declare_parameter("detector_confidence", 0.25)
-        self.declare_parameter("detector_class_synonyms", "")
-        detector_confidence = self.get_parameter("detector_confidence").value
-        detector_class_synonyms_str = self.get_parameter(
-            "detector_class_synonyms"
-        ).value
-        detector_class_synonyms = (
-            yaml.safe_load(detector_class_synonyms_str)
-            if detector_class_synonyms_str
-            else None
-        )
-        if detector_class_synonyms is not None and not isinstance(
-            detector_class_synonyms, dict
-        ):
-            raise ValueError(
-                "Parameter 'detector_class_synonyms' must be a YAML/JSON dict "
-                "mapping canonical class names to prompt phrases, got "
-                f"{type(detector_class_synonyms).__name__}: "
-                f"{detector_class_synonyms!r}"
-            )
-
         detector = YOLODetector(
             self.spot_interface,
             yolo_world_path=detector_model_path,
-            conf=detector_confidence,
-            class_synonyms=detector_class_synonyms,
         )
 
         # Fleet-wide, deliberately not under ~: every robot has to hear every
