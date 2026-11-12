@@ -48,7 +48,8 @@ class YOLODetector(Detector):
         # Check if the class exists in the list (lowercase for consistency)
         if semantic_class.lower() not in [cls.lower() for cls in recognized_classes]:
             updated_classes = recognized_classes + [semantic_class.lower()]
-            self.yolo_model.model.set_classes(updated_classes)
+            # YOLOE.set_classes computes the text embeddings the inner model needs
+            self.yolo_model.set_classes(updated_classes)
             print(f"Updated recognized classes: {updated_classes}")
 
     def return_centroid(self, img_source, semantic_class, debug):
@@ -116,7 +117,10 @@ class YOLODetector(Detector):
                 ):  # If the box is more than 95% the width of the image, skip it
                     continue
 
-                if class_name == semantic_class and confidence > best_confidence:
+                if (
+                    class_name.lower() == semantic_class.lower()
+                    and confidence > best_confidence
+                ):
                     best_confidence = confidence
                     best_box = box
 
