@@ -44,7 +44,7 @@ def clamp(value: float, cap: float) -> float:
 def send_body_velocity(spot, vx: float, vy: float, wz: float, duration_s: float):
     """Body-frame velocity via whichever interface the Spot exposes.
 
-    Real Spot and SimSpot implement ``set_twist`` (the real one sends a synchro
+    Real Spot implements ``set_twist`` (the real one sends a synchro
     velocity command with a short end time); FakeSpot implements ``set_vel``.
     """
     set_twist = getattr(spot, "set_twist", None)
@@ -248,7 +248,7 @@ class TeleopController:
             return  # someone else (the tablet) is in control; leave them be
         try:
             # Spot.stop() halts in place and never stands a sitting robot (a
-            # velocity command, even zero, would); SimSpot only has set_twist.
+            # velocity command, even zero, would).
             if hasattr(self.spot, "stop"):
                 self.spot.stop()
             else:
