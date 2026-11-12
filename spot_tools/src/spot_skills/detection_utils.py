@@ -117,7 +117,10 @@ class YOLODetector(Detector):
                 ):  # If the box is more than 95% the width of the image, skip it
                     continue
 
-                if class_name.lower() == semantic_class.lower() and confidence > best_confidence:
+                if (
+                    class_name.lower() == semantic_class.lower()
+                    and confidence > best_confidence
+                ):
                     best_confidence = confidence
                     best_box = box
 
