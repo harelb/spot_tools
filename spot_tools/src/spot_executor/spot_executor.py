@@ -188,6 +188,7 @@ class SpotExecutor:
         use_fake_path_planner=False,
         walk_to_standoff=1.5,
         walk_to_max_distance=5.0,
+        place_distance_warn_m=1.0,
     ):
         self.debug = False
         self.spot_interface = spot_interface
@@ -197,6 +198,9 @@ class SpotExecutor:
         self.walk_to_standoff = walk_to_standoff
         # Longest single walk-to move; far targets are approached in steps.
         self.walk_to_max_distance = walk_to_max_distance
+        # A place drops the object where the robot stands; warn when that is
+        # farther than this from the plan's place point.
+        self.place_distance_warn_m = place_distance_warn_m
         self.follower_lookahead = follower_lookahead
         self.goal_tolerance = goal_tolerance
         self.detector = detector
@@ -396,6 +400,13 @@ class SpotExecutor:
                     feedback.log_lease_takeover("manual_intervention")
                     # Wait until the lease manager has taken the lease back
                     time.sleep(2)
+                except Exception:
+                    # The sequence is aborted: report the action as failed, so
+                    # whatever planned it hears now rather than never.
+                    report = getattr(feedback, "report_action_done", None)
+                    if report is not None:
+                        report(sequence, command, False)
+                    raise
 
         except Exception as ex:
             if ix < len(sequence.actions):
@@ -455,7 +466,7 @@ class SpotExecutor:
 
         if success:
             # Update object holding state
-            feedback.set_robot_holding_state(True, command.object_id.upper())
+            self._update_holding_state(feedback, True, command.object_id.upper())
 
         feedback.print("INFO", "Finished `pick` command")
         feedback.print("INFO", f"Pick skill success: {success}")
@@ -463,6 +474,7 @@ class SpotExecutor:
 
     def execute_place(self, command, feedback):
         feedback.print("INFO", "Executing `place` command")
+        self._check_place_distance(command, feedback)
         success = object_place(
             self.spot_interface,
             semantic_class=command.object_class,
@@ -473,12 +485,64 @@ class SpotExecutor:
             # Update object holding state. Record the object where the plan put
             # it, not where the robot stands; the map is corrected if a later
             # observation disagrees.
-            feedback.set_robot_holding_state(
-                False, command.object_id.upper(), position=command.object_point
+            self._update_holding_state(
+                feedback,
+                False,
+                command.object_id.upper(),
+                position=command.object_point,
             )
 
         feedback.print("INFO", "Finished `place` command")
         return success
+
+    def _update_holding_state(self, feedback, is_holding, object_id, position=None):
+        """Report holding to the map without affecting the action's result.
+
+        The pick or place already happened, so its success stands (and is
+        reported on /action_done) even if the holding update is lost.
+        """
+        try:
+            ok = feedback.set_robot_holding_state(
+                is_holding, object_id, position=position
+            )
+        except Exception as ex:
+            ok = False
+            feedback.print("ERROR", f"Holding update for {object_id} raised: {ex!r}")
+        if ok is False:
+            feedback.print(
+                "ERROR",
+                f"Holding update for {object_id} (is_holding={is_holding}) did not "
+                "reach the map; the action result still reports it.",
+            )
+        return ok
+
+    def _check_place_distance(self, command, feedback):
+        """Warn if the robot is far from the plan's place point.
+
+        The object is dropped where the robot stands, but the map records it
+        at command.object_point. Logging only; the place goes ahead.
+        """
+        try:
+            t, r = self.transform_lookup("<spot_vision_frame>", command.frame)
+            target = transform_command_frame(
+                t, r, np.array([[*command.object_point[:2], 0.0]], dtype=float)
+            )[0, :2]
+            robot = np.asarray(self.spot_interface.get_pose(), dtype=float)[:2]
+        except Exception as ex:
+            feedback.print(
+                "DEBUG", f"Place distance check skipped (no robot or target pose: {ex})"
+            )
+            return None
+        distance = float(np.linalg.norm(robot - target))
+        if distance > self.place_distance_warn_m:
+            feedback.print(
+                "WARNING",
+                f"Placing {command.object_id} {distance:.2f} m from the plan's place "
+                f"point {list(np.round(command.object_point[:2], 2))} "
+                f"(threshold {self.place_distance_warn_m:.2f} m); the map records it "
+                "at the place point, not where it is dropped.",
+            )
+        return distance
 
     def execute_follow(self, command, feedback):
         feedback.print("INFO", "Executing `follow` command")
@@ -495,7 +559,18 @@ class SpotExecutor:
         path_distance = np.sum(
             np.linalg.norm(np.diff(command_to_send[:, :2], axis=0), axis=1)
         )
-        timeout = path_distance * 6
+        # Count the approach to the first waypoint too, and give every path a
+        # few seconds: a one-waypoint path has zero length, so it used to time
+        # out before the follower could see the robot was already there.
+        start = np.array(self.spot_interface.get_pose()[:2])
+        path_distance += np.linalg.norm(command_to_send[0, :2] - start)
+        if len(command_to_send) == 1:
+            # A path needs two points (the follower and mid-level planners make
+            # a LineString of it); drive from where the robot is.
+            here = command_to_send[0].copy()
+            here[:2] = start
+            command_to_send = np.vstack([here, command_to_send])
+        timeout = max(path_distance * 6, 5.0)
         feedback.print(
             "INFO",
             f"Using continous follower with params:\n\tlookahead: {self.follower_lookahead}\n\tgoal tolerance: {self.goal_tolerance}\n\ttimeout: {timeout}",

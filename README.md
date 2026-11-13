@@ -129,3 +129,12 @@ Pausing or terminating the plan interrupts a walk-to like any other motion. The
 offline tests `spot_tools/examples/test_walk_to_geometry.py` and
 `spot_tools/examples/test_object_grasp_walk_to.py` cover the geometry and the
 approval loop without a robot or the Boston Dynamics SDK. 
+
+## Holding updates over relayed links
+
+The executor retries the base station's `UpdateHoldingState` service using
+`holding_service_attempts` (default 3), `holding_service_wait_s` (3 seconds per
+attempt), and `holding_service_call_timeout_s` (5 seconds per reply). A failed
+update is logged without changing a successful pick/place result; `/action_done`
+also reports the completed action. The client uses a separate callback group so
+a preempting plan cannot block its reply while waiting for the old sequence.

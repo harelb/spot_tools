@@ -20,7 +20,10 @@ from nlu_interface_rviz.msg import (
     ManipulationApprovalRequest,
     ManipulationApprovalResponse,
 )
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.callback_groups import (
+    MutuallyExclusiveCallbackGroup,
+    ReentrantCallbackGroup,
+)
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile
@@ -53,6 +56,7 @@ from robot_executor_interface.mid_level_planner import (
 )
 from spot_tools_ros.fake_spot_ros import FakeSpotRos
 from spot_tools_ros.occupancy_grid_ros_updater import OccupancyGridROSUpdater
+from spot_tools_ros.service_utils import call_service_with_retry
 from spot_tools_ros.utils import get_tf_pose, waypoints_to_path
 
 
@@ -115,6 +119,12 @@ class RosFeedbackCollector:
         self._clock = None
         self.current_plan_id = ""
         self.current_robot_name = ""
+        # UpdateHoldingState calls cross the fleet relay to the base station,
+        # where a short wait is not enough. Overwritten from node parameters.
+        self.holding_service_wait_s = 3.0
+        self.holding_service_call_timeout_s = 5.0
+        self.holding_service_attempts = 3
+        self.robot_name = ""
 
         self.output_dir = output_dir
         self.log_to_file_level = log_to_file_level
@@ -380,6 +390,7 @@ class RosFeedbackCollector:
     def register_publishers(self, node):
         self.logger = node.get_logger()
         self._clock = node.get_clock()
+        self.robot_name = node.get_namespace().strip("/") or node.get_name()
 
         # ROS 2 transient local QoS for "latching" behavior
         latching_qos = QoSProfile(
@@ -436,8 +447,14 @@ class RosFeedbackCollector:
             10,
         )
 
+        # Its own reentrant group: the call is made from the action sequence
+        # thread and waits for the reply, which the executor must deliver even
+        # while a default-group callback (e.g. a preempting plan waiting for
+        # the old sequence to end) is running.
         self.holding_client = node.create_client(
-            UpdateHoldingState, "update_holding_state"
+            UpdateHoldingState,
+            "update_holding_state",
+            callback_group=ReentrantCallbackGroup(),
         )
 
         # Fleet-wide, like the plan itself: the planner reads every robot's
@@ -486,8 +503,14 @@ class RosFeedbackCollector:
         self.action_done_pub.publish(msg)
 
     def set_robot_holding_state(
-        self, is_holding: bool, object_id: str, position=None, timeout=5
+        self, is_holding: bool, object_id: str, position=None, timeout=None
     ):
+        """Tell the base station this robot now holds (or put down) object_id.
+
+        Returns True if the base station accepted the update. A failure is
+        logged at ERROR but never raised: the pick or place itself succeeded,
+        and its result is still reported on /action_done.
+        """
         req = UpdateHoldingState.Request()
         req.is_holding = is_holding
         req.id = object_id
@@ -501,18 +524,34 @@ class RosFeedbackCollector:
                 z=float(position[2]) if len(position) > 2 else 0.0,
             )
 
-        if not self.holding_client.wait_for_service(timeout_sec=0.5):
-            self.logger.warning("UpdateHoldingState service not available")
+        verb = "picked" if is_holding else "placed"
+        description = (
+            f"UpdateHoldingState for robot '{self.robot_name}' {verb} "
+            f"object '{object_id}'"
+        )
+        if timeout is None:
+            timeout = self.holding_service_call_timeout_s
+        try:
+            response = call_service_with_retry(
+                self.holding_client,
+                req,
+                self.logger,
+                description,
+                attempts=self.holding_service_attempts,
+                wait_for_service_s=self.holding_service_wait_s,
+                call_timeout_s=timeout,
+            )
+        except Exception:
+            self.logger.error(f"{description} raised:\n{traceback.format_exc()}")
             return False
-
-        future = self.holding_client.call_async(req)
-        start = time.time()
-        while not future.done():
-            if time.time() - start > timeout:
-                self.logger.error("UpdateHoldingState call timed out")
-                return False
-
-        return future.result().success
+        if response is None:
+            # call_service_with_retry already logged the failure at ERROR.
+            return False
+        if not response.success:
+            self.logger.error(f"{description}: rejected by the base station")
+            return False
+        self.logger.info(f"{description}: accepted by the base station")
+        return True
 
     def pick_confirmation_callback(self, msg):
         # if msg.data:
@@ -621,6 +660,10 @@ class SpotExecutorRos(Node):
         compress_manipulation_requests = self.get_parameter(
             "compress_manipulation_requests"
         ).value
+        # Place: warn when the robot is farther than this (m) from the plan's
+        # place point when it drops the object. Logging only.
+        self.declare_parameter("place_distance_warn_m", 1.0)
+        place_distance_warn_m = self.get_parameter("place_distance_warn_m").value
         # semantic_model_path = self.get_parameter("semantic_model_path").value
         # labelspace_path = self.get_parameter("labelspace_path").value
         # semantic_name_to_id = load_inverse_semantic_id_map_from_label_space(
@@ -658,6 +701,18 @@ class SpotExecutorRos(Node):
         )
         self.feedback_collector.compress_manipulation_requests = bool(
             compress_manipulation_requests
+        )
+        self.declare_parameter("holding_service_wait_s", 3.0)
+        self.declare_parameter("holding_service_call_timeout_s", 5.0)
+        self.declare_parameter("holding_service_attempts", 3)
+        self.feedback_collector.holding_service_wait_s = float(
+            self.get_parameter("holding_service_wait_s").value
+        )
+        self.feedback_collector.holding_service_call_timeout_s = float(
+            self.get_parameter("holding_service_call_timeout_s").value
+        )
+        self.feedback_collector.holding_service_attempts = int(
+            self.get_parameter("holding_service_attempts").value
         )
         self.feedback_collector.register_publishers(self)
 
@@ -807,6 +862,7 @@ class SpotExecutorRos(Node):
             use_fake_path_plan,
             walk_to_standoff=pick_walk_to_standoff,
             walk_to_max_distance=pick_walk_to_max_distance,
+            place_distance_warn_m=place_distance_warn_m,
         )
         self.spot_executor.initialize_lease_manager(self.feedback_collector)
 
